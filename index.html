@@ -2750,18 +2750,12 @@ links.forEach(function(l){l.addEventListener('click',function(e){e.preventDefaul
 var initId=location.hash?location.hash.slice(1):(links[0]?links[0].getAttribute('data-id'):'');
 if(initId&&document.getElementById(initId))showDoc(initId);
 else if(docs[0]){docs[0].classList.add('active');if(links[0])links[0].classList.add('active');}
-
-// 主题
 var tb=document.getElementById('theme-toggle');
 function setTheme(d){document.body.classList.toggle('dark',d);tb.textContent=d?'☀️':'🌙';try{localStorage.setItem('kb-theme',d?'dark':'light');}catch(e){}}
 var sv=null;try{sv=localStorage.getItem('kb-theme');}catch(e){}
 setTheme(sv?sv==='dark':false);
 tb.addEventListener('click',function(){setTheme(!document.body.classList.contains('dark'));});
-
-// 菜单
 document.getElementById('menu-toggle').addEventListener('click',function(){document.getElementById('sidebar').classList.toggle('show');});
-
-// 搜索
 var si=document.getElementById('search'),sp=document.getElementById('search-panel'),sr=document.getElementById('search-results'),DOCS=window.__DOCS__;
 si.addEventListener('input',function(){
   var q=si.value.trim().toLowerCase();
@@ -2788,7 +2782,6 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape')sp.classList.add('hidden');
   if(e.key==='/'&&e.target.tagName!=='INPUT'){e.preventDefault();si.focus();}
 });
-// 滚动进度条
 window.addEventListener('scroll',function(){
   var h=document.documentElement.scrollHeight-innerHeight;
   progress.style.width=(h>0?(scrollY/h*100):0)+'%';
