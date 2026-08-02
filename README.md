@@ -4,8 +4,8 @@
 > 技术方向：Java 后端 / 微服务 · 高并发 / 高可用 · 基础架构 / 中间件 · AI Agent 应用。
 
 📚 **在线浏览**：
-- GitHub Pages：`https://<你的GitHub用户名>.github.io/<仓库名>/`
-- Gitee Pages：`https://<你的Gitee用户名>.gitee.io/personal/`
+- ✅ **GitHub Pages**：https://xuren9391.github.io/java-interview-kb/
+- Gitee Pages：（需实名认证后开通）https://gitee.com/renxu/personal
 
 或者 **本地浏览**：下载本仓库，双击 `index.html` 即可（自包含单文件，无需联网）。
 
@@ -59,7 +59,7 @@
 
 ### 方式二：本地浏览
 ```bash
-git clone https://github.com/<你的用户名>/<仓库名>.git
+git clone https://github.com/xuren9391/java-interview-kb.git
 # 双击仓库里的 index.html 即可
 ```
 
