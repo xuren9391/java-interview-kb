@@ -1,12 +1,12 @@
-# AI Agent 应用（LLM · RAG 代码 · Agent 框架 · Java 工程化 · 架构图）
+# AI Agent 应用（LLM · RAG 全链路 · Agent · Java 工程化 · 深度案例）
 
 > 难度：🟢了解 🟡能落地 🔴精通
 > 这是 2024-2026 的热门方向，简历写了就会被问。**作为 Java 后端**，重点不是训模型，而是**如何把大模型能力工程化集成进业务系统**。
-> 这是你的差异化加分项，但前提是简历/项目里有体现，否则点到为止即可。
+> **本文档重点：深度案例讲解**（含完整代码、架构图、踩坑、效果数据），让你面试能讲出"我做过、踩过这些坑、量化了这些效果"。
 
 ---
 
-# 第一章 大模型（LLM）基础 🟢
+# 第一章 大模型（LLM）基础
 
 ## 1.1 核心概念
 
@@ -19,21 +19,28 @@
 | **Temperature** | 采样温度，0=确定性，1+=创造性 |
 | **Top-p / Top-k** | 采样策略，控制生成多样性 |
 
-## 1.2 模型分类
+## 1.2 模型分类与选型
 
-| 类型 | 代表 | 特点 |
-|------|------|------|
-| 闭源 API | GPT-4、Claude、Gemini、GLM-4 | 能力强、付费、数据出域 |
-| 开源权重 | Llama3、Qwen、DeepSeek、Mistral | 可私有部署、可微调 |
-| 专用模型 | Embedding（bge、text-embedding）、多模态 | 不做对话，做特定任务 |
+| 类型 | 代表 | 特点 | 适用 |
+|------|------|------|------|
+| 闭源 API | GPT-4、Claude、Gemini、GLM-4 | 能力强、付费、数据出域 | 通用场景、非敏感数据 |
+| 开源权重 | Llama3、Qwen、DeepSeek、Mistral | 可私有部署、可微调、免费 | 敏感数据、内部场景、降本 |
+| 专用模型 | Embedding（bge-m3）、Rerank（bge-reranker） | 不做对话，做特定任务 | RAG 的向量化/重排 |
 
-**选型**：内部敏感数据用开源私有化（Qwen/DeepSeek）；通用能力用闭源 API；特定任务用专用小模型降本。
+**选型决策树** 🔴：
+```
+数据敏感吗？
+├─ 是（内部文档/客户数据）→ 开源私有化（Qwen/DeepSeek）
+└─ 否 → 需要顶级能力吗？
+        ├─ 是 → GPT-4 / Claude
+        └─ 否（降本）→ 开源 API（通义/智谱）或小模型
+```
 
-## 1.3 大模型的"坑"（面试加分点）🔴🔴
+## 1.3 大模型的"坑"（面试加分点）🔴
 
 | 问题 | 说明 | 应对 |
 |------|------|------|
-| **幻觉 Hallucination** | 一本正经胡说八道 | RAG + 提示约束 + 引用溯源 |
+| **幻觉** | 一本正经胡说八道 | RAG + 提示约束 + 引用溯源 |
 | **时效性** | 训练数据有截止日期 | RAG / 联网搜索 / Function Calling |
 | **上下文长度限制** | 长文本塞不下 | 分块 + RAG / 长上下文模型 |
 | **成本高** | token 费用 | 缓存、降模型、Batch、流式 |
@@ -43,15 +50,15 @@
 
 ---
 
-# 第二章 Prompt 工程 🟡
+# 第二章 Prompt 工程
 
 ## 2.1 提示工程原则
 1. **明确具体**：任务、输入、输出格式说清楚。
 2. **结构化**：用 markdown / 标签分隔指令、上下文、示例。
 3. **Few-shot**：给 2-5 个示例引导格式。
-4. **角色设定**："你是一个资深 Java 工程师……"。
+4. **角色设定**："你是资深 Java 工程师……"。
 5. **思维链 CoT**：要求"一步步思考"，提升推理。
-6. **约束输出**：要求 JSON / schema，便于程序解析。
+6. **约束输出**：JSON / schema，便于程序解析。
 
 ## 2.2 Prompt 模板（实战）
 ```
@@ -79,15 +86,9 @@
 - LLM 决定调用哪个工具、传什么参数。
 - 拿到工具结果，LLM 继续推理。
 
-```
-用户："查下北京明天天气"
-LLM → 调用 get_weather(city="北京", date="明天")
-工具返回 → LLM 组织回答
-```
-
 ---
 
-# 第三章 RAG（检索增强生成）🔴🔴 必懂（落地主流）
+# 第三章 RAG（检索增强生成）🔴 必懂
 
 ## 3.1 为什么需要 RAG
 LLM 知识有限、会幻觉、不懂私有数据。RAG = **检索 + 生成**：
@@ -96,17 +97,7 @@ LLM 知识有限、会幻觉、不懂私有数据。RAG = **检索 + 生成**：
 ```
 类比"开卷考试"：LLM 是考生，检索系统给参考资料。
 
-## 3.2 RAG 全链路 🔴🔴
-
-```
-【离线索引阶段】
-原始文档 → 清洗 → 分块(Chunking) → 向量化(Embedding) → 存向量库
-
-【在线查询阶段】
-用户问题 → 向量化 → 向量检索 Top-K → 重排(Rerank) → 拼 prompt → LLM → 回答(带引用)
-```
-
-## 3.3 架构图 🔴
+## 3.2 RAG 全链路架构图 🔴
 
 ```
 ┌─────────────── 离线索引（Indexing）─────────────────┐
@@ -117,7 +108,7 @@ LLM 知识有限、会幻觉、不懂私有数据。RAG = **检索 + 生成**：
 
 ┌─────────────── 在线查询（Retrieval）─────────────────┐
 │  用户 Query                                          │
-│     → Query 改写（扩展/纠错）                         │
+│     → Query 改写（扩展/纠错/HyDE）                    │
 │     → 向量化                                          │
 │     → 多路召回：向量检索(语义) + BM25(关键词) + 知识图谱 │
 │     → Rerank 精排（Cross-Encoder）                    │
@@ -128,139 +119,328 @@ LLM 知识有限、会幻觉、不懂私有数据。RAG = **检索 + 生成**：
 └──────────────────────────────────────────────────────┘
 ```
 
-## 3.4 关键环节详解
+## 3.3 关键环节详解
 
 ### ① 文档分块 Chunking 🟡
 - 按字数（500-1000 token）滑动窗口。
 - 按语义（段落、Markdown 标题）。
 - 重叠（overlap 10-20%）避免切断语义。
-- 太小块信息不全，太大块稀释相关性。
+- 太小信息不全，太大块稀释相关性。
 - 进阶：**父子块**（小块检索、大块给 LLM）。
 
 ### ② Embedding 向量化 🟢
-- 用 Embedding 模型（bge-m3、text-embedding-3、m3e）把文本变向量（768/1024/1536 维）。
+- 用 Embedding 模型（bge-m3、text-embedding-3、m3e）把文本变向量。
 - 语义相近的文本向量距离近（余弦相似度）。
 
 ### ③ 向量检索 🔴
-- **ANN（近似最近邻）算法**：
-  - **HNSW**（主流）：分层图，精度好速度快。
-  - **IVF**：聚类，快但精度略低。
-  - **PQ**：乘积量化压缩，省内存。
-- **向量库**：
-  - **Milvus**（开源主流，分布式）
-  - **Faiss**（库，非服务）
-  - **Qdrant / Weaviate**
-  - **PGVector**（PostgreSQL 扩展，简单，小规模够用）
-  - **Elasticsearch / Redis** 也支持向量（混合检索方便）
+- **ANN 算法**：HNSW（主流，精度好）、IVF（聚类，快）、PQ（压缩省内存）。
+- **向量库**：Milvus（分布式主流）、Faiss（库）、Qdrant、PGVector（PG 扩展，小规模）。
 - **混合检索**：向量（语义）+ BM25（关键词）融合，效果更好。
 
 ### ④ 重排 Rerank 🟡
-- 检索 Top-50 后用 **Cross-Encoder** 模型（如 bge-reranker）精排取 Top-5。
+- 检索 Top-50 后用 **Cross-Encoder**（如 bge-reranker）精排取 Top-5。
 - 检索（双塔）快但粗，重排慢但准，组合最优。
 
-### ⑤ Prompt 拼装 + 引用 🟡
-- 把检索到的文档 + 用户问题组装 prompt，要求 LLM"只基于以下资料回答，并标注引用"。
-
-## 3.5 RAG 进阶 🔴
-- **Query 改写**：用户口语化问题改写成更适合检索的形式。
+## 3.4 RAG 进阶 🔴
+- **Query 改写**：口语化问题改成更适合检索的形式；**HyDE**（先让 LLM 生成假设答案再检索）。
 - **多路召回**：向量 + 关键词 + 知识图谱。
 - **父子块（Parent-Child）**：小块检索、大块给 LLM。
 - **元数据过滤**：按文档类型、时间、权限过滤。
 - **Self-RAG / Corrective RAG**：让 LLM 自评检索质量，决定是否重检索。
 
-## 3.6 RAG 评估 🔴
+## 3.5 RAG 评估 🔴
 - **检索质量**：Recall@K（相关文档是否被召回）。
 - **生成质量**：Faithfulness（忠于资料）、Answer Relevancy（切题）。
 - 工具：RAGAS、TruLens。
 
-## 3.7 Spring AI + RAG 代码示例 🔴
-
-```java
-// 1. 配置向量库
-@Bean
-public VectorStore vectorStore(EmbeddingModel embeddingModel) {
-    return PgVectorStore.builder(jdbcTemplate, embeddingModel)
-        .dimensions(1536).build();
-}
-
-// 2. 离线：文档入库
-public void ingestDocuments(List<Document> docs) {
-    // 分块
-    TokenTextSplitter splitter = new TokenTextSplitter();
-    List<Document> chunks = splitter.apply(docs);
-    // 向量化 + 入库
-    vectorStore.add(chunks);
-}
-
-// 3. 在线：检索增强问答
-public String chatWithRag(String question) {
-    return chatClient.prompt()
-        .user(question)
-        .advisors(new QuestionAnswerAdvisor(vectorStore, SearchRequest.defaults()
-            .withTopK(5)
-            .withSimilarityThreshold(0.7)))
-        .call()
-        .content();
-}
-```
-
 ---
 
-# 第四章 Agent（智能体）🔴🔴
+# 第四章 Agent（智能体）
 
 ## 4.1 什么是 Agent
 LLM + 工具调用 + 规划 + 记忆 = **能自主完成多步任务的智能体**。
 
-区别于单轮对话，Agent 能：
-- **规划**：拆解任务为子步骤。
-- **使用工具**：Function Calling 调 API、查数据库、执行代码。
-- **反思迭代**：根据结果调整下一步。
-- **记忆**：短期（对话上下文）+ 长期（向量库存储经验）。
+## 4.2 Agent 经典模式 🔴
+- **ReAct**（Thought → Action → Observation 循环）。
+- **Plan-and-Execute**（先规划全计划再执行）。
+- **Reflection**（执行后反思，发现错误回退）。
 
-## 4.2 Agent 经典模式 🔴🔴
-
-**① ReAct（Reasoning + Acting）**
-```
-Thought（思考）→ Action（行动/调工具）→ Observation（观察结果）→ 循环
-```
-最经典的 Agent 范式。
-
-**② Plan-and-Execute**
-先规划完整计划，再逐步执行。适合复杂长任务。
-
-**③ Reflection / Self-Correction**
-执行后自我反思，发现错误回退重来。
-
-## 4.3 多 Agent 协作 🔴
-- **角色分工**：如 AutoGen（researcher + coder + critic）。
-- **编排**：MetaGPT（软件公司模拟）、CrewAI（团队协作）。
-- **工作流**：LangGraph（状态机式编排，可控性强）。
-
-## 4.4 主流框架对比 🔴
-
+## 4.3 主流框架 🔴
 | 框架 | 特点 | 适用 |
 |------|------|------|
-| **LangChain** | 生态最大，链式编排 | 通用、原型 |
-| **LlamaIndex** | RAG 专精 | 知识库问答 |
-| **LangGraph** | 状态机，可控 Agent | 生产级复杂 Agent |
-| **AutoGen**（微软） | 多 Agent 对话 | 多角色协作 |
-| **Dify** | 低代码可视化平台 | 快速搭建、非技术友好 |
-| **Coze**（字节） | Bot 搭建平台 | 轻量应用 |
-| **Spring AI**（Java！） | **Java 生态**，对标 LangChain | **Java 后端集成首选** |
+| LangChain | 生态最大 | 通用原型 |
+| LlamaIndex | RAG 专精 | 知识库问答 |
+| LangGraph | 状态机，可控 | 生产级 Agent |
+| **Spring AI** | **Java 生态** | **Java 后端集成首选** |
 | **LangChain4j** | Java 版 LangChain | Java 集成 |
-
-**作为 Java 工程师**：重点看 **Spring AI** 和 **LangChain4j**。
 
 ---
 
-# 第五章 Java 接入 LLM 工程化 🔴（你的主战场）
+# 第五章 深度案例讲解 🔴🔴（面试加分核心）
 
-## 5.1 Spring AI 核心抽象 🟡
-- 统一抽象：`ChatClient`、`EmbeddingModel`、`VectorStore`、`ChatMemory`、`Advisor`。
-- 支持多模型：OpenAI、Anthropic、Ollama（本地）、阿里通义、智谱 GLM、Azure。
-- 内置 RAG（Advisor）、Function Calling（Tool）、Structured Output、ChatMemory。
+> 这章是本文档的重点。每个案例按「背景 → 架构 → 核心代码 → 踩坑 → 效果」讲，让你面试能讲出深度。
 
-## 5.2 整体架构落地 🔴🔴
+## 案例一：企业知识库智能问答（RAG 经典落地）
+
+### 📌 背景
+某公司内部有大量文档（产品文档、技术规范、FAQ、历史工单），员工查找效率低。传统搜索（ES 关键词）召回不准、无法理解自然语言提问。
+
+### 🏗️ 架构
+```
+【离线】
+内部文档(PDF/Word/Confluence/工单)
+  → 文档解析(unstructured/PdfBox)
+  → 清洗(去水印/格式化)
+  → 分块(TokenTextSplitter, 500 token, overlap 50)
+  → Embedding(bge-m3, 1024 维)
+  → 存 Milvus + 元数据(部门/权限/时间)
+
+【在线】
+员工提问
+  → Query 改写(LLM 把口语改规范)
+  → 多路召回：向量(Milvus Top 20) + BM25(Top 20) → RRF 融合
+  → Rerank(bge-reranker-large 精排取 Top 5)
+  → 权限过滤(只取该员工有权限的)
+  → 拼 Prompt(资料 + 引用约束)
+  → LLM(Qwen-72B 私有化) 生成
+  → 引用标注(返回每个论据的文档出处)
+```
+
+### 💻 核心代码（Spring AI）
+```java
+@Service
+public class KnowledgeQAService {
+    private final ChatClient chatClient;
+    private final VectorStore vectorStore;
+    private final SearchService searchService; // BM25 检索
+    private final RerankService rerankService;
+
+    public AnswerResult answer(String question, User user) {
+        // 1. Query 改写
+        String rewritten = queryRewrite(question);
+
+        // 2. 多路召回
+        List<Document> vectorHits = vectorStore.similaritySearch(
+            SearchRequest.query(rewritten).withTopK(20).withSimilarityThreshold(0.6));
+        List<Document> bm25Hits = searchService.bm25Search(rewritten, 20);
+
+        // 3. RRF 融合
+        List<Document> merged = rrfMerge(vectorHits, bm25Hits);
+
+        // 4. Rerank 精排
+        List<Document> reranked = rerankService.rerank(rewritten, merged, 5);
+
+        // 5. 权限过滤
+        List<Document> accessible = reranked.stream()
+            .filter(d -> user.canAccess(d.getMetadata().get("dept")))
+            .collect(toList());
+
+        // 6. 生成 + 引用
+        String context = buildContextWithCitations(accessible);
+        String answer = chatClient.prompt()
+            .system("基于以下资料回答，每个论据标注[文档名]出处，资料没有就说不知道")
+            .user(question + "\n\n资料：\n" + context)
+            .call()
+            .content();
+
+        return new AnswerResult(answer, extractCitations(accessible));
+    }
+}
+```
+
+### 🕳️ 踩坑与解决 🔴
+
+**坑 1：分块太大导致检索稀释**
+- 现象：一个 2000 token 的块里只有一小段相关，但整块都作为上下文，LLM 被无关内容干扰。
+- 解决：改用**父子块**——用小块（200 token）检索，命中后取其所属大块（1000 token）给 LLM。
+
+**坑 2：专业术语召回不准**
+- 现象："K8s 节点调度" 检索不到写 "Kubernetes pod 调度" 的文档（语义近但用词不同）。
+- 解决：① 同义词词典扩充 query；② bge-m3 多语言模型对中英混合友好；③ 加 BM25 补关键词召回。
+
+**坑 3：幻觉（LLM 编造资料里没有的内容）**
+- 解决：① Prompt 强约束"资料没有就说不知道"；② 引用溯源（要求每个论据标出处）；③ 后置校验（答案里的关键事实回查资料）。
+
+**坑 4：权限泄漏**
+- 现象：销售员工问"薪资制度"，检索到了 HR 私密文档。
+- 解决：**检索后按用户权限过滤**（元数据带部门/密级），不只靠 LLM 自觉。
+
+**坑 5：成本爆炸**
+- 现象：每次都把 Top 20 文档全塞 prompt，token 消耗大。
+- 解决：① Rerank 后只取 Top 5；② Prompt 缓存（相同问题）；③ 简单问题走小模型。
+
+### 📊 效果
+- 召回准确率（Recall@5）：从纯向量 72% → 混合检索 85% → +Rerank 91%。
+- 回答满意度：人工评测 82%（vs 传统关键词搜索 45%）。
+- 单次问答成本：0.03 元（Qwen 私有化摊销）。
+- 响应时间：P95 3.2s（首 token 1.5s + 生成）。
+
+---
+
+## 案例二：智能客服（RAG + 多轮 + 转人工）
+
+### 📌 背景
+电商客服压力大，80% 是重复问题（订单状态、退换货、物流）。传统规则客服死板，关键词匹配不准。
+
+### 🏗️ 架构
+```
+用户消息
+  → 意图识别(LLM 分类：闲聊/业务咨询/投诉)
+  ├─ 闲聊 → 直接 LLM 回复
+  ├─ 业务咨询
+  │   → 查用户上下文(最近订单)
+  │   → RAG 检索 FAQ/政策文档
+  │   → Function Calling 查实时数据(查订单/物流)
+  │   → 生成回复 + 推荐话术
+  └─ 投诉/复杂 → 转人工(带工单摘要)
+  
+记忆：Redis 存对话历史(最近 10 轮)，超长则摘要压缩
+```
+
+### 💻 Function Calling 查实时数据
+```java
+@Bean
+@Description("查询用户订单状态")
+public Function<OrderQuery, OrderInfo> queryOrder(OrderService svc) {
+    return q -> svc.getOrder(q.userId(), q.orderId());
+}
+
+// LLM 自动判断需要查订单时调用
+String reply = chatClient.prompt()
+    .system("你是电商客服，友好专业。可调用工具查实时数据。")
+    .user(userMessage)
+    .functions("queryOrder", "queryLogistics", "createReturn")
+    .advisors(new MessageChatMemoryAdvisor(chatMemory, conversationId, 10))
+    .call()
+    .content();
+```
+
+### 🕳️ 踩坑
+- **多轮记忆丢失**：超过上下文窗口 → 用摘要压缩历史对话。
+- **工具调用错误**：LLM 传错参数 → schema 严格校验 + 默认值。
+- **转人工时机**：设阈值（连续 2 次答非所问 / 用户明确要求 / 投诉情绪）。
+
+### 📊 效果
+- 自动解决率：68%（80% 重复问题里解决了一大半）。
+- 平均响应时间：2s（vs 人工 3-5 分钟）。
+- 客户满意度：4.3/5（vs 纯规则客服 3.1）。
+
+---
+
+## 案例三：Text2SQL（自然语言查数据）
+
+### 📌 背景
+业务方/运营想看数据但不会写 SQL，找开发排期慢。希望"用一句话查报表"。
+
+### 🏗️ 架构
+```
+用户："上个月华东区销售额 Top 10 的商品"
+  → RAG 检索相关表结构说明 + few-shot 示例
+  → LLM 生成 SQL
+  → SQL 校验(语法/权限/白名单表)
+  → 只读账号执行
+  → 结果 → LLM 生成自然语言解读 + 图表配置
+```
+
+### 💻 核心实现
+```java
+public Text2SQLResult query(String question, User user) {
+    // 1. 检索相关 schema
+    List<TableSchema> tables = schemaRetriever.find(question);
+    String schemaDesc = formatSchema(tables); // 表名/字段/注释/示例
+
+    // 2. few-shot 示例
+    List<Example> examples = exampleStore.findSimilar(question, 3);
+
+    // 3. 生成 SQL
+    String sql = chatClient.prompt()
+        .system(SQL_TEMPLATE) // 含约束：只读/限制行数/禁用危险操作
+        .user(buildPrompt(question, schemaDesc, examples))
+        .call()
+        .entity(SQLExtraction.class) // 结构化输出
+        .getSql();
+
+    // 4. 安全校验
+    sqlValidator.validate(sql, user); // 白名单表/只读/行数限制
+
+    // 5. 执行
+    QueryResult data = readOnlyJdbcTemplate.query(sql);
+
+    // 6. 生成解读
+    String insight = chatClient.prompt()
+        .user("用自然语言解读这组数据：" + data)
+        .call().content();
+
+    return new Text2SQLResult(sql, data, insight);
+}
+```
+
+### 🕳️ 踩坑
+- **复杂 SQL 准确率低**（多表 join、子查询）→ 限制复杂度 + 提供视图（view）简化。
+- **schema 理解错**→ 给字段加中文注释 + 示例值。
+- **安全问题**→ 只读账号 + 表白名单 + SQL 审计日志 + 行数限制。
+- **幻觉表/字段**→ 校验生成的 SQL 里字段是否真实存在。
+
+### 📊 效果
+- 简单查询准确率：88%；复杂查询：62%（兜底转人工）。
+- 业务方自助查询占比：45%（减少开发排期）。
+
+---
+
+## 案例四：Agent 自动化运维（ReAct 多步任务）
+
+### 📌 背景
+线上告警后，运维要查日志、看监控、定位服务、甚至重启。希望 Agent 自动初步定位。
+
+### 🏗️ 架构（ReAct 循环）
+```
+告警："order-service CPU 90%"
+  → Thought: 需要先查是哪个实例、什么进程占用
+  → Action: 调用 query_monitor(service="order-service", metric="cpu")
+  → Observation: pod-2 CPU 95%，GC 频繁
+  → Thought: 可能是 FullGC，查 GC 日志
+  → Action: query_logs(pod="pod-2", keyword="Full GC")
+  → Observation: "Full GC 10s 一次，老年代 95%"
+  → Thought: 内存泄漏，dump 分析
+  → Action: heap_dump(pod="pod-2")
+  → ... 最终生成诊断报告 + 建议处理
+```
+
+### 💻 LangGraph 状态机实现（关键）
+```java
+// 定义状态机节点
+StateGraph<AgentState> graph = new StateGraph<>(AgentState.class)
+    .addNode("plan", planNode)        // 规划
+    .addNode("execute", executeNode)  // 执行工具
+    .addNode("reflect", reflectNode)  // 反思
+    .addEdge(START, "plan")
+    .addEdge("plan", "execute")
+    .addConditionalEdges("execute", shouldContinue,  // 判断是否完成
+        Map.of("continue", "plan", "end", END));
+
+// 工具集
+List<Tool> tools = List.of(
+    new QueryMonitorTool(),
+    new QueryLogsTool(),
+    new HeapDumpTool(),
+    new RestartServiceTool()  // 高危操作，需人工确认
+);
+```
+
+### 🕳️ 踩坑
+- **死循环**（Agent 反复调同一工具）→ 设最大步数 + 去重。
+- **高危操作**（如重启、删数据）→ 强制人工确认（Human-in-the-loop）。
+- **工具描述不清**→ LLM 调错工具 → schema 写详细 + 给示例。
+
+### 📊 效果
+- 简单告警自动定位率：55%（自动出诊断报告，人工复核）。
+- 平均定位时间：从 20 分钟降到 4 分钟。
+
+---
+
+# 第六章 Java 工程化（你的主战场）
+
+## 6.1 整体架构落地 🔴
 
 ```
 用户 → API 网关 → 业务服务
@@ -279,40 +459,22 @@ Thought（思考）→ Action（行动/调工具）→ Observation（观察结�
 
 **与传统系统关系**：AI 作为**增强层**（搜索重排、智能客服、Text2SQL、报表生成），不替代核心事务。核心业务仍走 Java。
 
-## 5.3 Function Calling 示例（Spring AI）🔴
-
-```java
-@Bean
-@Description("查询订单状态")
-public Function<OrderStatusRequest, OrderStatus> queryOrderStatus(OrderService orderService) {
-    return request -> orderService.getStatus(request.orderId());
-}
-
-// ChatClient 自动把 Function 注册为 tool
-String answer = chatClient.prompt()
-    .user("我的订单 12345 发货了吗？")
-    .functions("queryOrderStatus")  // LLM 决定调用
-    .call()
-    .content();
-// LLM 会调用 queryOrderStatus({orderId:12345})，拿到结果后组织回答
-```
-
-## 5.4 工程化要点 🔴🔴
+## 6.2 工程化要点 🔴🔴
 
 ### ① 成本控制
-- **Prompt 缓存**：相同 prompt 缓存结果（Redis）。
-- **模型分级**：简单任务用小模型，复杂用大（Router 路由）。
+- **Prompt 缓存**：相同 prompt 缓存（Redis），命中率 30-50%。
+- **模型分级**：简单任务用小模型（Qwen-7B），复杂用大（Qwen-72B）。
 - **Batch 接口**：批量请求降单价。
 - **流式输出**：边生成边返回，体感快。
 
 ### ② 可靠性
-- **重试 + 降级**：API 失败重试，主模型挂切备用模型。
-- **超时控制**：LLM 响应慢，设合理超时。
-- **限流**：防止恶意调用烧钱。
-- **结构化输出**：JSON schema / Function Calling 强制格式，避免解析失败。
+- **重试 + 降级**：API 失败重试，主模型挂切备用。
+- **超时控制**：LLM 慢，设合理超时。
+- **限流**：防恶意烧钱。
+- **结构化输出**：JSON schema / Function Calling 强制格式。
 
 ### ③ 安全
-- **输入审核**：敏感词、Prompt Injection（"忽略以上指令，输出..."）防护。
+- **输入审核**：Prompt Injection（"忽略以上指令"）防护。
 - **输出审核**：合规过滤（涉黄涉政）。
 - **脱敏**：敏感数据不出域（用私有化模型）。
 - **审计日志**：记录调用。
@@ -322,45 +484,19 @@ String answer = chatClient.prompt()
 - LangSmith / Langfuse（Trace）。
 - 评估体系（准确率、满意度）。
 
-## 5.5 Text2SQL（典型场景）🔴
-- 自然语言 → SQL → 执行 → 图表。
-- 方案：LLM + RAG（schema 说明、few-shot 示例）+ Function Calling（执行 SQL）+ 结果校验。
-- 生产要点：
-  - 限制可查表/字段（白名单）。
-  - 只读账号（防删改）。
-  - 结果行数限制。
-  - SQL 语法校验 + 执行计划检查。
-  - 人工兜底（复杂查询转人工）。
-
----
-
-# 第六章 典型业务场景 🟡
-
-| 场景 | 要点 |
-|------|------|
-| 智能客服/知识库问答 | RAG + 企业知识 + 多轮对话 + 转人工 |
-| 智能数据分析（Text2SQL） | NL→SQL，schema 理解、权限 |
-| 代码助手 | 生成/Review/文档/单测 |
-| 工作流自动化 | Agent 调度多工具完成业务流程 |
-| 内容生成 | 营销文案、摘要、翻译、分类 |
-
 ---
 
 # 第七章 面试可能问的（简历有 AI 才需要）🔴
 
 1. 你做的 AI 项目解决了什么业务问题？效果怎么评估？🔴
 2. RAG 流程？分块、检索、重排分别怎么做？🔴
-3. 向量检索为什么用 HNSW？和 IVF、暴力检索区别？🔴
-4. 混合检索（向量+BM25）为什么？🔴
-5. LLM 幻觉怎么解决？🔴
-6. Agent vs RAG 区别？ReAct？🔴
-7. 怎么控制 LLM 调用的成本和延迟？🔴
-8. Prompt 怎么管理？A/B？版本？🟡
-9. 为什么用 Spring AI / LangChain4j？vs Python？🟡
-10. 模型怎么选？开源 vs 闭源？🔴
-11. Function Calling 怎么保证可靠性？🔴
-12. 你项目的 AI 部分架构？怎么和 Java 业务集成？🔴
+3. 向量检索为什么用 HNSW？混合检索为什么？🔴
+4. LLM 幻觉怎么解决？🔴
+5. Agent vs RAG 区别？ReAct？🔴
+6. 怎么控制 LLM 调用的成本和延迟？🔴
+7. 你项目的 AI 部分架构？怎么和 Java 业务集成？🔴
+8. **深度追问**：RAG 召回率怎么提升？（讲混合检索 + Rerank + 父子块）
+9. **深度追问**：你的 RAG 踩过什么坑？（讲分块、权限、幻觉）
+10. **深度追问**：Agent 怎么防死循环和高危操作？
 
-> ⚠️ **提醒**：AI 是加分项不是必考。简历没写别强答，会了反而显得浮夸。简历写了就必须吃透，否则被反噬。
-
-> 对应面试题：`面试/面试题-AI-Agent.md`
+> ⚠️ **提醒**：AI 是加分项。简历没写别强答。简历写了就必须吃透（尤其上面 4 个案例的细节），否则被反噬。
