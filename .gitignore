@@ -9,3 +9,6 @@ Thumbs.db
 
 # 临时生成脚本
 _gen.js
+
+# Windows 误产生的 nul 设备名文件
+nul

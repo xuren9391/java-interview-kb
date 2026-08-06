@@ -7,7 +7,7 @@
 > **精讲规范（每个知识点 5 维度）**：
 > 1. 为什么 / 痛点分析
 > 2. 原理图解 + 代码 / 配置
-> 3. 真实案例（优先企迈场景）
+> 3. 真实案例（优先茶饮 SaaS 场景）
 > 4. 对比 / 边界
 > 5. 面试话术（30-60 秒，8 年工程师视角）
 
@@ -100,9 +100,9 @@ public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, Str
 }
 ```
 
-### 真实案例（企迈 · 多支付渠道）
+### 真实案例（茶饮 SaaS 场景
 
-企迈点单业务有多种支付渠道（微信、支付宝、会员储值、礼品卡），用接口 + @Qualifier + 策略模式：
+前司点单业务有多种支付渠道（微信、支付宝、会员储值、礼品卡），用接口 + @Qualifier + 策略模式：
 ```java
 public interface PayChannel { void pay(Order order); }
 
@@ -134,7 +134,7 @@ Spring 的容器让"加一种支付方式"= 加一个 @Service，业务代码零
 
 ### 面试话术
 
-「IoC 是控制反转的思想，把对象创建和依赖装配的控制权从业务代码转到容器。DI 是它的实现，由容器主动注入依赖。我用得最多的是构造器注入——不可变、好测试，Spring 官方也推荐。底层核心是 BeanFactory，注解注入靠 AutowiredAnnotationBeanPostProcessor 在 postProcessProperties 阶段反射 set 字段。在我们企迈点单里，多种支付渠道用 Map<String,PayChannel> 注入实现策略分发，加一种支付就是加个 @Service，符合开闭原则。」
+「IoC 是控制反转的思想，把对象创建和依赖装配的控制权从业务代码转到容器。DI 是它的实现，由容器主动注入依赖。我用得最多的是构造器注入——不可变、好测试，Spring 官方也推荐。底层核心是 BeanFactory，注解注入靠 AutowiredAnnotationBeanPostProcessor 在 postProcessProperties 阶段反射 set 字段。在我们前司点单里，多种支付渠道用 Map<String,PayChannel> 注入实现策略分发，加一种支付就是加个 @Service，符合开闭原则。」
 
 ---
 
@@ -248,7 +248,7 @@ public class MyBeanPostProcessor implements BeanPostProcessor {
 }
 ```
 
-### 真实案例（企迈 · @PostConstruct 初始化缓存）
+### 真实案例（茶饮 SaaS 场景
 
 优惠券计算引擎启动时要从 DB 加载规则到本地缓存：
 ```java
@@ -416,7 +416,7 @@ protected Object getEarlyBeanReference(String beanName, RootBeanDefinition mbd, 
 
 **构造器注入循环依赖的解法**：改成 setter/字段注入，或用 @Lazy（注入代理，首次使用才创建）。
 
-### 真实案例（企迈 · 启动循环依赖）
+### 真实案例（茶饮 SaaS 场景
 
 **现象**：项目启动报 `BeanCurrentlyInCreationException`，A(优惠券计算)→B(促销规则)→C(商品价)→A。
 **排查**：看堆栈找循环链。三个 Service 互相调，本质是职责划分不清。
@@ -546,9 +546,9 @@ public class OrderService {
    ```
 3. **拆到不同类**（最干净）。
 
-### 真实案例（企迈 · AOP 做接口日志 + 限流）
+### 真实案例（茶饮 SaaS 场景
 
-企迈门店端接口用 AOP 统一记录调用日志和操作人：
+前司门店端接口用 AOP 统一记录调用日志和操作人：
 ```java
 @Aspect
 @Component
@@ -587,7 +587,7 @@ public class WebLogAspect {
 
 ### 面试话术
 
-「Spring AOP 是基于代理的运行时织入，BeanPostProcessor 后置阶段由 AbstractAutoProxyCreator 生成代理。如果目标有接口走 JDK 动态代理，没有就走 CGLIB，SpringBoot 2.x 默认 CGLIB。最大的坑是 this 调用失效——代理对象调目标方法，目标里 this 是目标自己不是代理，所以 self.xxx() 的 @Transactional 不生效。解法是注入自己（@Lazy self）走代理，或 AopContext.currentProxy()，最干净是拆类。我在企迈用 AOP 统一做门店接口的日志和操作人埋点，切点匹配 Controller，一次实现全链路覆盖。」
+「Spring AOP 是基于代理的运行时织入，BeanPostProcessor 后置阶段由 AbstractAutoProxyCreator 生成代理。如果目标有接口走 JDK 动态代理，没有就走 CGLIB，SpringBoot 2.x 默认 CGLIB。最大的坑是 this 调用失效——代理对象调目标方法，目标里 this 是目标自己不是代理，所以 self.xxx() 的 @Transactional 不生效。解法是注入自己（@Lazy self）走代理，或 AopContext.currentProxy()，最干净是拆类。我在前司用 AOP 统一做门店接口的日志和操作人埋点，切点匹配 Controller，一次实现全链路覆盖。」
 
 ---
 
@@ -672,7 +672,7 @@ public Object invoke(MethodInvocation inv) throws Throwable {
 - MyBatis/JPA 通过 `DataSourceUtils.getConnection()` 获取，优先从 ThreadLocal 拿（事务内的 Connection），没有才从连接池拿。
 - 这就是为什么多线程不共享事务——ThreadLocal 隔离。
 
-### 真实案例（企迈 · @Transactional 失效致脏数据）
+### 真实案例（茶饮 SaaS 场景
 
 **现象**：优惠券核销 + 积分发放，核销成功但积分发放异常，券没了积分没到。
 **排查**：
@@ -701,7 +701,7 @@ public class CouponService {
 
 ### 面试话术
 
-「@Transactional 本质是 AOP，TransactionInterceptor 在方法前用 PlatformTransactionManager 开启事务、把 Connection 绑定 ThreadLocal，方法正常提交、抛异常按 rollbackFor 回滚。默认只回滚 RuntimeException，所以我习惯加 rollbackFor=Exception.class。最常踩的坑是 self 调用失效——this 不是代理，还有异常被 catch 吞掉。传播行为默认 REQUIRED，REQUIRES_NEW 是独立物理事务（外层挂起），NESTED 是同事务的 savepoint 嵌套。我在企迈遇到过券核销和积分发放不在同一事务，核销成功积分失败导致数据不一致，根因就是外层方法漏了 @Transactional，补上后两步原子化。」
+「@Transactional 本质是 AOP，TransactionInterceptor 在方法前用 PlatformTransactionManager 开启事务、把 Connection 绑定 ThreadLocal，方法正常提交、抛异常按 rollbackFor 回滚。默认只回滚 RuntimeException，所以我习惯加 rollbackFor=Exception.class。最常踩的坑是 self 调用失效——this 不是代理，还有异常被 catch 吞掉。传播行为默认 REQUIRED，REQUIRES_NEW 是独立物理事务（外层挂起），NESTED 是同事务的 savepoint 嵌套。我在前司遇到过券核销和积分发放不在同一事务，核销成功积分失败导致数据不一致，根因就是外层方法漏了 @Transactional，补上后两步原子化。」
 
 ---
 
@@ -783,9 +783,9 @@ public class DataSourceAutoConfiguration {
 
 **关键设计**：`@ConditionalOnMissingBean` 让**用户自定义 Bean 优先**，覆盖默认配置。这就是 SpringBoot "约定大于配置 + 允许覆盖"的核心。
 
-### 真实案例（企迈 · 多数据源覆盖默认）
+### 真实案例（茶饮 SaaS 场景
 
-企迈有主库（订单）和报表库（统计），默认 DataSourceAutoConfiguration 只配一个 DataSource。我们用 @Configuration 自己配两个 DataSource Bean，因为 `@ConditionalOnMissingBean`，SpringBoot 默认的就不生效，完美覆盖。
+前司有主库（订单）和报表库（统计），默认 DataSourceAutoConfiguration 只配一个 DataSource。我们用 @Configuration 自己配两个 DataSource Bean，因为 `@ConditionalOnMissingBean`，SpringBoot 默认的就不生效，完美覆盖。
 
 ### 对比 / 边界
 
@@ -800,7 +800,7 @@ public class DataSourceAutoConfiguration {
 
 ### 面试话术
 
-「SpringBoot 自动配置入口是 @SpringBootApplication 里的 @EnableAutoConfiguration，它 @Import 了 AutoConfigurationImportSelector。selectImports 里先从 META-INF/spring.factories（2.x）或 AutoConfiguration.imports（3.x）加载所有候选配置类，去重排序，再用 @Conditional 过滤——@ConditionalOnClass 看类路径有没有，@ConditionalOnBean 看容器有没有，最关键的是 @ConditionalOnMissingBean，让用户自定义 Bean 优先覆盖默认。DataSourceAutoConfiguration 就是这样：引了 jdbc 依赖、用户没自己配 DataSource，它才生效。我在企迈配多数据源时就是利用这个机制，自定义两个 DataSource Bean 覆盖默认。」
+「SpringBoot 自动配置入口是 @SpringBootApplication 里的 @EnableAutoConfiguration，它 @Import 了 AutoConfigurationImportSelector。selectImports 里先从 META-INF/spring.factories（2.x）或 AutoConfiguration.imports（3.x）加载所有候选配置类，去重排序，再用 @Conditional 过滤——@ConditionalOnClass 看类路径有没有，@ConditionalOnBean 看容器有没有，最关键的是 @ConditionalOnMissingBean，让用户自定义 Bean 优先覆盖默认。DataSourceAutoConfiguration 就是这样：引了 jdbc 依赖、用户没自己配 DataSource，它才生效。我在前司配多数据源时就是利用这个机制，自定义两个 DataSource Bean 覆盖默认。」
 
 ---
 
@@ -869,9 +869,9 @@ public class MyAutoConfiguration {
 com.xx.autoconf.MyAutoConfiguration
 ```
 
-### 真实案例（企迈 · 统一鉴权 Starter）
+### 真实案例（茶饮 SaaS 场景
 
-企迈多个 SaaS 服务都要校验门店 token，封装成 `qw-auth-spring-boot-starter`：引依赖 + yml 配开关，自动注入鉴权 Filter + Gateway 全局过滤器（见 3.6），各服务零代码接入。
+前司多个 SaaS 服务都要校验门店 token，封装成 `qw-auth-spring-boot-starter`：引依赖 + yml 配开关，自动注入鉴权 Filter + Gateway 全局过滤器（见 3.6），各服务零代码接入。
 
 ### 对比 / 边界
 
@@ -883,7 +883,7 @@ com.xx.autoconf.MyAutoConfiguration
 
 ### 面试话术
 
-「自定义 Starter 分 autoconfigure 和 starter 两个模块：autoconfigure 写 @ConfigurationProperties 配置类、业务 Service、@AutoConfiguration 配置类（带 @ConditionalOnClass/@ConditionalOnMissingBean/@ConditionalOnProperty），然后在 META-INF/spring/AutoConfiguration.imports（3.x）或 spring.factories（2.x）声明配置类全名。starter 模块只打依赖。@ConditionalOnMissingBean 让用户能覆盖默认，@ConditionalOnProperty 让用户用 yml 开关。我在企迈做过统一鉴权 Starter，多服务引依赖即接入门店 token 校验。」
+「自定义 Starter 分 autoconfigure 和 starter 两个模块：autoconfigure 写 @ConfigurationProperties 配置类、业务 Service、@AutoConfiguration 配置类（带 @ConditionalOnClass/@ConditionalOnMissingBean/@ConditionalOnProperty），然后在 META-INF/spring/AutoConfiguration.imports（3.x）或 spring.factories（2.x）声明配置类全名。starter 模块只打依赖。@ConditionalOnMissingBean 让用户能覆盖默认，@ConditionalOnProperty 让用户用 yml 开关。我在前司做过统一鉴权 Starter，多服务引依赖即接入门店 token 校验。」
 
 ---
 
@@ -932,9 +932,9 @@ SpringApplication.run()
 
 **内嵌 Tomcat 启动时机**：`onRefresh() → createWebServer()` 创建，connector 在 `finishRefresh` 启动（接收请求）。
 
-### 真实案例（企迈 · 启动慢优化）
+### 真实案例（茶饮 SaaS 场景
 
-企迈某服务启动 90s，排查发现 finishBeanFactoryInitialization 阶段慢——有个 @PostConstruct 里同步加载 10 万条规则到内存。优化：改 @PostConstruct 异步加载 + 启动后并行预热，启动降到 30s。
+前司某服务启动 90s，排查发现 finishBeanFactoryInitialization 阶段慢——有个 @PostConstruct 里同步加载 10 万条规则到内存。优化：改 @PostConstruct 异步加载 + 启动后并行预热，启动降到 30s。
 
 ### 对比 / 边界
 
@@ -983,7 +983,7 @@ SpringApplication.run()
 
 ### 面试话术
 
-「微服务把单体按业务拆分独立部署，解决单体膨胀和扩容问题，但引入分布式复杂性。SpringCloud 是微服务治理全家桶，Netflix 一代已停更，现在主流 Alibaba：Nacos 注册+配置、Gateway 网关、Sentinel 熔断限流、Seata 分布式事务、Dubbo RPC。SpringBoot 是单应用快速开发框架，SpringCloud 是基于 Boot 的分布式协调层。我在企迈 SaaS 茶饮后端用整套 Alibaba 栈，Nacos 注册几百个门店服务和促销服务实例。」
+「微服务把单体按业务拆分独立部署，解决单体膨胀和扩容问题，但引入分布式复杂性。SpringCloud 是微服务治理全家桶，Netflix 一代已停更，现在主流 Alibaba：Nacos 注册+配置、Gateway 网关、Sentinel 熔断限流、Seata 分布式事务、Dubbo RPC。SpringBoot 是单应用快速开发框架，SpringCloud 是基于 Boot 的分布式协调层。我在前司 SaaS 茶饮后端用整套 Alibaba 栈，Nacos 注册几百个门店服务和促销服务实例。」
 
 ---
 
@@ -1039,9 +1039,9 @@ Consumer 启动
   → Consumer 本地缓存实例列表 + 软负载选实例调用
 ```
 
-### 真实案例（企迈 · Nacos 注册）
+### 真实案例（茶饮 SaaS 场景
 
-企迈门店端几百个服务实例注册到 Nacos，门店高峰期实例扩容，Nacos 5s 内推送新实例列表，调用方无感切换。某次 Nacos 集群网络抖动分区，因 AP 模式查询没断，业务靠熔断兜底，几秒后恢复。
+前司门店端几百个服务实例注册到 Nacos，门店高峰期实例扩容，Nacos 5s 内推送新实例列表，调用方无感切换。某次 Nacos 集群网络抖动分区，因 AP 模式查询没断，业务靠熔断兜底，几秒后恢复。
 
 ### 对比 / 边界
 
@@ -1055,7 +1055,7 @@ Consumer 启动
 
 ### 面试话术
 
-「注册中心选型核心是 CAP。Eureka 走 AP，去中心化复制，分区时返回旧数据不阻塞；ZK 走 CP，ZAB 强一致，但 leader 选举期间整个集群不可用，对服务发现是灾难。注册中心为什么选 AP？因为服务发现的核心价值是可用性，宁可返回旧数据让客户端重试熔断兜底，也不能查询失败导致雪崩。Nacos 兼顾两者：临时实例用 Distro 协议走 AP 适合服务发现，持久实例用 Raft 走 CP 适合配置。企迈门店服务全注册 Nacos，扩容时 5 秒推送新实例，调用方无感。」
+「注册中心选型核心是 CAP。Eureka 走 AP，去中心化复制，分区时返回旧数据不阻塞；ZK 走 CP，ZAB 强一致，但 leader 选举期间整个集群不可用，对服务发现是灾难。注册中心为什么选 AP？因为服务发现的核心价值是可用性，宁可返回旧数据让客户端重试熔断兜底，也不能查询失败导致雪崩。Nacos 兼顾两者：临时实例用 Distro 协议走 AP 适合服务发现，持久实例用 Raft 走 CP 适合配置。前司门店服务全注册 Nacos，扩容时 5 秒推送新实例，调用方无感。」
 
 ---
 
@@ -1086,9 +1086,9 @@ Feign/RestTemplate 调 order-service
   → 用真实 ip2:port 发请求
 ```
 
-### 真实案例（企迈 · 灰度路由）
+### 真实案例（茶饮 SaaS 场景
 
-企迈促销服务灰度发布，自定义 IRule：从 RequestHeader 取 env 灰度标签，优先选 metadata 匹配的实例，没匹配再走默认轮询。
+前司促销服务灰度发布，自定义 IRule：从 RequestHeader 取 env 灰度标签，优先选 metadata 匹配的实例，没匹配再走默认轮询。
 
 ### 对比 / 边界
 
@@ -1101,7 +1101,7 @@ Feign/RestTemplate 调 order-service
 
 ### 面试话术
 
-「Ribbon 是客户端负载均衡，调用方从注册中心拉实例列表，本地用 IRule 选一个直连，比 Nginx 少一跳。策略有轮询、随机、最少并发、加权 RT、多机房感知。我在企迈做过灰度路由，自定义 IRule 从请求头取灰度标签，优先匹配实例 metadata，实现促销服务灰度发布。Spring Cloud 2020 后 Ribbon 被官方 LoadBalancer 替代，原理类似。」
+「Ribbon 是客户端负载均衡，调用方从注册中心拉实例列表，本地用 IRule 选一个直连，比 Nginx 少一跳。策略有轮询、随机、最少并发、加权 RT、多机房感知。我在前司做过灰度路由，自定义 IRule 从请求头取灰度标签，优先匹配实例 metadata，实现促销服务灰度发布。Spring Cloud 2020 后 Ribbon 被官方 LoadBalancer 替代，原理类似。」
 
 ---
 
@@ -1154,9 +1154,9 @@ feign:
         read-timeout: 5000
 ```
 
-### 真实案例（企迈 · 优惠券服务调商品服务）
+### 真实案例（茶饮 SaaS 场景
 
-企迈优惠券计算要查商品价格，用 Feign 调商品服务，配 fallback——商品服务抖动时返回缓存价，保证优惠券计算不阻塞。
+前司优惠券计算要查商品价格，用 Feign 调商品服务，配 fallback——商品服务抖动时返回缓存价，保证优惠券计算不阻塞。
 
 ### 对比 / 边界
 
@@ -1169,7 +1169,7 @@ feign:
 
 ### 面试话术
 
-「Feign 是声明式 HTTP 客户端，@EnableFeignClients 扫描 @FeignClient 接口，FeignClientFactoryBean 为每个接口生成 JDK 动态代理。调用时解析注解构造 RequestTemplate，经负载均衡选实例，HTTP 客户端发请求解码响应。集成 Sentinel 是注入 SentinelInvocationHandler，每个方法一个资源，熔断调 fallback。我在企迈优惠券调商品服务用 Feign + fallback，商品服务抖动时返回缓存价保证计算不阻塞。注意超时要配 connect-timeout/read-timeout，避免单次调用拖垮线程池。」
+「Feign 是声明式 HTTP 客户端，@EnableFeignClients 扫描 @FeignClient 接口，FeignClientFactoryBean 为每个接口生成 JDK 动态代理。调用时解析注解构造 RequestTemplate，经负载均衡选实例，HTTP 客户端发请求解码响应。集成 Sentinel 是注入 SentinelInvocationHandler，每个方法一个资源，熔断调 fallback。我在前司优惠券调商品服务用 Feign + fallback，商品服务抖动时返回缓存价保证计算不阻塞。注意超时要配 connect-timeout/read-timeout，避免单次调用拖垮线程池。」
 
 ---
 
@@ -1217,9 +1217,9 @@ sampleCount（桶数，默认 2）+ intervalInMs（窗口时长，默认 1s）
 - **异常比例**：异常请求占比 > 比例 → 熔断。
 - **异常数**：异常数 > 阈值 → 熔断。
 
-### 真实案例（企迈 · Sentinel 限流门店接口）
+### 真实案例（茶饮 SaaS 场景
 
-企迈门店端高峰期下单接口 QPS 暴涨，给 `/order/create` 配 Sentinel 流控：QPS 阈值 2000，超了快速失败返回"系统繁忙"。配合 Warm Up 让数据库连接池预热，避免冷启动打满。规则通过 Sentinel Dashboard 推送，无需重启。
+前司门店端高峰期下单接口 QPS 暴涨，给 `/order/create` 配 Sentinel 流控：QPS 阈值 2000，超了快速失败返回"系统繁忙"。配合 Warm Up 让数据库连接池预热，避免冷启动打满。规则通过 Sentinel Dashboard 推送，无需重启。
 
 ### 对比 / 边界
 
@@ -1232,7 +1232,7 @@ sampleCount（桶数，默认 2）+ intervalInMs（窗口时长，默认 1s）
 
 ### 面试话术
 
-「Sentinel 是阿里熔断限流组件，比 Hystrix 强在流控、系统自适应、控制台。隔离用信号量（无线程切换开销），统计用 LeapArray 滑动窗口（时间轮 + CAS 无锁，高性能）。流控三种效果：快速失败、Warm Up 冷启动预热、匀速排队漏桶削峰。熔断三种触发：慢调用比例、异常比例、异常数。我在企迈给门店下单接口配 QPS 限流，高峰超阈值快速失败，配合 Warm Up 预热数据库连接池，规则通过 Dashboard 推送免重启。」
+「Sentinel 是阿里熔断限流组件，比 Hystrix 强在流控、系统自适应、控制台。隔离用信号量（无线程切换开销），统计用 LeapArray 滑动窗口（时间轮 + CAS 无锁，高性能）。流控三种效果：快速失败、Warm Up 冷启动预热、匀速排队漏桶削峰。熔断三种触发：慢调用比例、异常比例、异常数。我在前司给门店下单接口配 QPS 限流，高峰超阈值快速失败，配合 Warm Up 预热数据库连接池，规则通过 Dashboard 推送免重启。」
 
 ---
 
@@ -1329,16 +1329,16 @@ public class AuthFilter implements GlobalFilter, Ordered {
 - 网关是 IO 密集（转发请求），非阻塞异步（Reactor + Netty）用少量线程支撑高并发。
 - 用 MVC 同步阻塞，每个请求占一个线程，后端慢时线程堆积，网关先挂。
 
-### 真实案例（企迈 · Gateway 统一鉴权）
+### 真实案例（茶饮 SaaS 场景
 
-企迈所有门店端请求过 Gateway，全局 AuthFilter 校验门店 token，解析出 storeId/userId 塞进请求头转发后端。配合 Sentinel 给 Gateway 做网关限流（按 IP / 按门店维度）。
+前司所有门店端请求过 Gateway，全局 AuthFilter 校验门店 token，解析出 storeId/userId 塞进请求头转发后端。配合 Sentinel 给 Gateway 做网关限流（按 IP / 按门店维度）。
 
 ### 网关能做什么
 路由、鉴权、限流、熔断、日志、协议转换（HTTP↔gRPC）、灰度路由、API 聚合。
 
 ### 面试话术
 
-「Spring Cloud Gateway 是基于 WebFlux + Netty + Reactor 的异步非阻塞网关，核心模型 Route = Predicate + Filter。请求来后 Handler Mapping 按 Predicate 匹配路由，Web Handler 构造过滤器链，Pre Filter 鉴权限流改请求头，转发后端，Post Filter 改响应。Filter 分 GlobalFilter（全局鉴权日志）和 GatewayFilter（路由级）。为什么用 WebFlux？网关是 IO 密集型，异步非阻塞用少量线程扛高并发，避免后端慢时线程堆积拖垮网关。我在企迈用 Gateway 全局 Filter 校验门店 token 塞 storeId，配合 Sentinel 按门店维度限流。」
+「Spring Cloud Gateway 是基于 WebFlux + Netty + Reactor 的异步非阻塞网关，核心模型 Route = Predicate + Filter。请求来后 Handler Mapping 按 Predicate 匹配路由，Web Handler 构造过滤器链，Pre Filter 鉴权限流改请求头，转发后端，Post Filter 改响应。Filter 分 GlobalFilter（全局鉴权日志）和 GatewayFilter（路由级）。为什么用 WebFlux？网关是 IO 密集型，异步非阻塞用少量线程扛高并发，避免后端慢时线程堆积拖垮网关。我在前司用 Gateway 全局 Filter 校验门店 token 塞 storeId，配合 Sentinel 按门店维度限流。」
 
 ---
 
@@ -1374,9 +1374,9 @@ public class PromoController {
 }
 ```
 
-### 真实案例（企迈 · Nacos 配置热更新）
+### 真实案例（茶饮 SaaS 场景
 
-企迈促销活动开关放 Nacos，运营在控制台改 `promo.flashsale.enabled=true`，所有服务 30s 内感知并开启秒杀活动，**无需重启**。曾踩坑：用 @Value 但没加 @RefreshScope，配置变了 Bean 不重建读到旧值，补上 @RefreshScope 解决。推荐用 @ConfigurationProperties（自动刷新更稳）。
+前司促销活动开关放 Nacos，运营在控制台改 `promo.flashsale.enabled=true`，所有服务 30s 内感知并开启秒杀活动，**无需重启**。曾踩坑：用 @Value 但没加 @RefreshScope，配置变了 Bean 不重建读到旧值，补上 @RefreshScope 解决。推荐用 @ConfigurationProperties（自动刷新更稳）。
 
 ### 对比 / 边界
 
@@ -1389,7 +1389,7 @@ public class PromoController {
 
 ### 面试话术
 
-「Nacos 配置中心用长轮询——客户端发请求 hold 30s，服务端配置没变就阻塞到超时返回，变了立即返回变更 Data ID，客户端再拉具体配置更新本地并通知 Listener。热更新靠 @RefreshScope，它给 Bean 包代理，配置变更时销毁原 Bean，下次调用重建读到新值。我在企迈把促销活动开关放 Nacos，运营改配置秒级生效，避免重启。注意 @Value 要配 @RefreshScope 才生效，@ConfigurationProperties 自动刷新更省心。」
+「Nacos 配置中心用长轮询——客户端发请求 hold 30s，服务端配置没变就阻塞到超时返回，变了立即返回变更 Data ID，客户端再拉具体配置更新本地并通知 Listener。热更新靠 @RefreshScope，它给 Bean 包代理，配置变更时销毁原 Bean，下次调用重建读到新值。我在前司把促销活动开关放 Nacos，运营改配置秒级生效，避免重启。注意 @Value 要配 @RefreshScope 才生效，@ConfigurationProperties 自动刷新更省心。」
 
 ---
 
@@ -1423,9 +1423,9 @@ TC（事务协调器）：Seata Server，协调全局事务状态
 | SAGA | 长事务编排补偿 | 中 | 长流程 |
 | XA | 强一致两阶段提交 | 低 | 强一致 |
 
-### 真实案例（企迈 · 下单分布式事务）
+### 真实案例（茶饮 SaaS 场景
 
-企迈下单涉及订单服务（创订单）+ 库存服务（扣库存）+ 资产服务（扣优惠券），用 Seata AT 模式 + @GlobalTransactional 保证一致。曾遇问题：某分支 undo_log 没生成（因没配数据源代理），排查发现 DataSourceProxy 没配，补上后正常。
+前司下单涉及订单服务（创订单）+ 库存服务（扣库存）+ 资产服务（扣优惠券），用 Seata AT 模式 + @GlobalTransactional 保证一致。曾遇问题：某分支 undo_log 没生成（因没配数据源代理），排查发现 DataSourceProxy 没配，补上后正常。
 
 ### 对比 / 边界
 
@@ -1438,7 +1438,7 @@ TC（事务协调器）：Seata Server，协调全局事务状态
 
 ### 面试话术
 
-「Seata 解决微服务跨库事务。AT 模式最常用——业务无侵入，RM 自动记录数据 before/after 镜像到 undo_log，全局事务回滚时反向补偿。流程是 TM 开全局事务拿 XID，XID 经 RPC 透传，各分支执行完本地事务即提交并注册，TM 收齐结果通知 TC 提交或回滚。注意要给每个服务配 DataSourceProxy 让 Seata 接管数据源生成 undo_log。我在企迈下单链路（订单+库存+资产）用 AT 模式，@GlobalTransactional 保证一致。」
+「Seata 解决微服务跨库事务。AT 模式最常用——业务无侵入，RM 自动记录数据 before/after 镜像到 undo_log，全局事务回滚时反向补偿。流程是 TM 开全局事务拿 XID，XID 经 RPC 透传，各分支执行完本地事务即提交并注册，TM 收齐结果通知 TC 提交或回滚。注意要给每个服务配 DataSourceProxy 让 Seata 接管数据源生成 undo_log。我在前司下单链路（订单+库存+资产）用 AT 模式，@GlobalTransactional 保证一致。」
 
 ---
 
@@ -1494,9 +1494,9 @@ Monitor
 
 **关键设计**：注册中心只负责"地址发现"，调用是 **Consumer → Provider 直连**（长连接），降低注册中心压力。
 
-### 真实案例（企迈 · 内部高频调用）
+### 真实案例（茶饮 SaaS 场景
 
-企迈商品价格计算高频被优惠券/订单/促销调用，HTTP 性能不够，用 Dubbo + Nacos 注册，长连接复用 + Hessian2 序列化，RT 比 Feign 低 50%。
+前司商品价格计算高频被优惠券/订单/促销调用，HTTP 性能不够，用 Dubbo + Nacos 注册，长连接复用 + Hessian2 序列化，RT 比 Feign 低 50%。
 
 ### 对比 / 边界
 
@@ -1509,7 +1509,7 @@ Monitor
 
 ### 面试话术
 
-「Dubbo 是高性能 RPC 框架。Provider 启动注册到 Registry，Consumer 订阅拿 Provider 列表本地缓存，调用时软负载选实例长连接直连，不经注册中心，异步上报 Monitor。关键设计是地址发现和调用分离，注册中心压力小。我在企迈商品价格计算这种高频内部调用用 Dubbo 替代 Feign，长连接复用 + Hessian2 序列化，RT 降一半。」
+「Dubbo 是高性能 RPC 框架。Provider 启动注册到 Registry，Consumer 订阅拿 Provider 列表本地缓存，调用时软负载选实例长连接直连，不经注册中心，异步上报 Monitor。关键设计是地址发现和调用分离，注册中心压力小。我在前司商品价格计算这种高频内部调用用 Dubbo 替代 Feign，长连接复用 + Hessian2 序列化，RT 降一半。」
 
 ---
 
@@ -1575,9 +1575,9 @@ public class Protocol$Adaptive implements Protocol {
 }
 ```
 
-### 真实案例（企迈 · 自定义 Dubbo Filter）
+### 真实案例（茶饮 SaaS 场景
 
-企迈用 Dubbo SPI 自定义 Filter 做调用链 traceId 透传和慢调用日志，注册到 `META-INF/dubbo/org.apache.dubbo.rpc.Filter`，Dubbo 自动包装到调用链。
+前司用 Dubbo SPI 自定义 Filter 做调用链 traceId 透传和慢调用日志，注册到 `META-INF/dubbo/org.apache.dubbo.rpc.Filter`，Dubbo 自动包装到调用链。
 
 ### 对比 / 边界
 
@@ -1590,7 +1590,7 @@ public class Protocol$Adaptive implements Protocol {
 
 ### 面试话术
 
-「Dubbo SPI 是 Dubbo 灵活性的根基，比 Java SPI 强三点：按 key 加载（@SPI("default") + 配置文件 key=value）、IOC（setter 注入扩展点）、AOP（Wrapper 自动包装，如 ProtocolFilterWrapper 给 Protocol 加 Filter 链）。@Adaptive 自适应扩展是精华——运行时根据 URL 参数动态选实现，编译期生成 Protocol$Adaptive，从 URL 取 protocol 参数再 getExtension。我在企迈自定义 Dubbo Filter 做 traceId 透传和慢调用日志，注册到 META-INF/dubbo/...Filter 文件即生效。」
+「Dubbo SPI 是 Dubbo 灵活性的根基，比 Java SPI 强三点：按 key 加载（@SPI("default") + 配置文件 key=value）、IOC（setter 注入扩展点）、AOP（Wrapper 自动包装，如 ProtocolFilterWrapper 给 Protocol 加 Filter 链）。@Adaptive 自适应扩展是精华——运行时根据 URL 参数动态选实现，编译期生成 Protocol$Adaptive，从 URL 取 protocol 参数再 getExtension。我在前司自定义 Dubbo Filter 做 traceId 透传和慢调用日志，注册到 META-INF/dubbo/...Filter 文件即生效。」
 
 ---
 
@@ -1646,9 +1646,9 @@ Provider 端 NettyServer 收 → 业务线程池执行 → 返回
 ### 隐式传参
 - `RpcContext.getContext().setAttachment("traceId", id)`：链路透传，不侵入方法签名。
 
-### 真实案例（企迈 · Dubbo 治理）
+### 真实案例（茶饮 SaaS 场景
 
-企迈商品服务用 Random 加权（按实例性能配权重）、Failover 读、Failfast 写。traceId 用 RpcContext attachment 全链路透传。
+前司商品服务用 Random 加权（按实例性能配权重）、Failover 读、Failfast 写。traceId 用 RpcContext attachment 全链路透传。
 
 ### 面试话术
 

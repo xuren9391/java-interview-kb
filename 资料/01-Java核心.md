@@ -4,9 +4,10 @@
 > 这是后端面试基本盘，几乎每场必问，且最容易拉开差距。
 > **本文档目标：从 API 级讲到源码/内核级 + 设计动机 + 大量图解 + 线上实战案例。**
 >
-> **背景设定**：本文案例围绕「企迈科技 SaaS 茶饮小程序后端」（2021.9 至今）展开——
+> **背景设定**：本文案例围绕「SaaS 茶饮小程序后端」（2021.9 至今）展开——
 > 优惠券/资产计算、点单商品业务、促销活动设计开发；近百万家门店、接口 RT 2s→400ms、高峰缓存命中 85%。
-> 每个知识点都按【为什么/痛点 → 原理图解+代码 → 真实案例 → 对比/边界 → 面试话术】五维度展开。
+> 每个可讲解的知识点都按【**① 为什么** → **② 原理图解** → **③ 代码示例** → **④ 真实案例** → **⑤ 面试怎么说**】五维度展开。
+> 列表型/工具型内容（如对象创建6步、对象内存布局、GC Roots清单、参数清单、高频追问清单、线上排查SOP）保持原样。
 
 ---
 
@@ -14,14 +15,14 @@
 
 ## 1.1 运行时数据区（JDK8+ 全景图）
 
-### 【为什么/痛点】为什么要划分这么多区域？
+**① 为什么 / 痛点**
 
-一句话：**不同数据的"生命周期 + 共享范围"完全不同**，混在一起管理会又慢又危险。
+为什么要划分这么多区域？一句话：**不同数据的"生命周期 + 共享范围"完全不同**，混在一起管理会又慢又危险。
 - 线程私有的栈帧、PC 寄存器：随线程生灭，不需要加锁，零竞争。
 - 线程共享的堆、方法区：跨线程可见，需要 GC 管理、需要并发控制。
 - 把"私有数据"和"共享数据"物理隔离，JVM 才能针对各自特性做极致优化（栈用完即抛、堆用 GC、元空间用本地内存）。
 
-### 【原理图解】
+**② 怎么做 / 原理图解**
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -58,9 +59,26 @@
 | 虚拟机栈 | `StackOverflowError` | 递归过深；`Unable to create new native thread` 线程数超限 |
 | 直接内存 | `Direct buffer memory` | Netty/NIO 堆外未释放 |
 
+**③ 代码验证 / 代码示例**
+
+各区域的深度细节见下方"必须讲清的 6 个深度点"中的源码、参数验证与 JMH/JOL 用法。
+
+**④ 真实案例**
+
+在 JDK8 早期遇到过 PermGen 因 CGLIB 动态代理生成大量优惠券规则类而 OOM；切换到元空间 + `-XX:MaxMetaspaceSize=512m` 兜底后根治（详见深度点 ①）。网关层用直接内存优化 NIO 拷贝（详见深度点 ④）。
+
+**⑤ 面试怎么说**
+
+「JVM 运行时数据区我会按『线程私有 vs 线程共享』二分法讲。私有的有 PC、虚拟机栈、本地方法栈——随线程生灭零竞争；共享的有堆、方法区（元空间）——跨线程可见，需要 GC。核心动机是『按数据的生命周期和共享范围物理隔离，让 JVM 各区做极致优化』。我们项目在 JDK8 早期还遇到过 PermGen 因 CGLIB 代理券规则 OOM，换元空间后根治。这块我会延伸讲元空间演进、直接内存、逃逸分析、TLAB 几个深度点。」
+
+---
+
 ### 🔴 必须讲清的 6 个深度点
 
-**① 永久代 → 元空间的演进（JDK8）**
+#### 深度点 ①：永久代 → 元空间的演进（JDK8）
+
+**① 为什么 / 痛点**
+
 | | 永久代（JDK7-） | 元空间（JDK8+） |
 |---|---|---|
 | 位置 | JVM 堆的一部分 | **本地内存（Native Memory）** |
@@ -73,31 +91,68 @@
 3. JRockit 和 Hotspot 融合的需要（JRockit 没有永久代）。
 4. 元空间用本地内存，GC 扫描范围小，full GC 更快。
 
-**【面试话术】**
-「永久代到元空间这个演进，我理解核心动机是『把元数据从 JVM 进程堆里解放出来』。我们企迈在 JDK8 早期就遇到过，项目里大量用 CGLIB 做优惠券规则的动态代理，加上 Spring AOP，PermGen 一度天天 OOM。换 JDK8 元空间后，类元数据走本地内存，配合 `-XX:MaxMetaspaceSize=512m` 兜底，再没出过 PermGen 问题。本质上这是 Oracle 融合 JRockit 的产物，也让 GC 在扫描类元数据时范围更小。」
+**② 怎么做 / 原理图解**
+
+元空间位于本地内存（Native Memory），不再占用 JVM 堆。类元数据（Klass）从 JVM 进程堆解放到本地内存，由 `-XX:MaxMetaspaceSize` 限制上限（默认无上限）。
+
+**③ 代码验证 / 代码示例**
+
+```bash
+# 元空间参数
+-XX:MetaspaceSize=256m         # 触发 Full GC 的元空间阈值
+-XX:MaxMetaspaceSize=512m      # 元空间上限（兜底，防止吃光物理内存）
+# 用 jcmd 观察元空间使用
+jcmd <pid> GC.heap_info
+```
+
+**④ 真实案例**
+
+项目在 JDK8 早期里大量用 CGLIB 做优惠券规则的动态代理，加上 Spring AOP，PermGen 一度天天 OOM。换 JDK8 元空间后，类元数据走本地内存，配合 `-XX:MaxMetaspaceSize=512m` 兜底，再没出过 PermGen 问题。
+
+**⑤ 面试怎么说**
+
+「永久代到元空间这个演进，我理解核心动机是『把元数据从 JVM 进程堆里解放出来』。我们项目在 JDK8 早期就遇到过，项目里大量用 CGLIB 做优惠券规则的动态代理，加上 Spring AOP，PermGen 一度天天 OOM。换 JDK8 元空间后，类元数据走本地内存，配合 `-XX:MaxMetaspaceSize=512m` 兜底，再没出过 PermGen 问题。本质上这是 Oracle 融合 JRockit 的产物，也让 GC 在扫描类元数据时范围更小。」
 
 ---
 
-**② 为什么程序计数器是线程私有的？**
+#### 深度点 ②：为什么程序计数器是线程私有的？
+
 - 字节码解释器靠 PC 决定下一条执行什么。多线程切换后回来，必须从自己上次的位置继续，所以每线程一个 PC。
 - **如果 PC 共享**：线程 A 切走、B 执行覆盖了 PC，A 回来就从 B 的位置继续，整个执行流乱套。
 - PC 是唯一一个 **JVM 规范中明确规定不会 OOM** 的区域。
 
-**③ 为什么虚拟机栈/本地方法栈是线程私有的？**
-- 栈帧存局部变量、操作数栈。每个方法调用一个栈帧。私有保证各线程方法调用互不干扰。
-- 栈深固定（-Xss，默认 512K-1M），递归太深 → `StackOverflowError`。
-- 局部变量表以 **变量槽（Slot）** 为单位，32 位类型占 1 槽，64 位（long/double）占 2 槽。
+**⑤ 面试怎么说**
 
-**【面试话术】**
 「PC 和栈为什么私有，本质是『线程切换的语义正确性』。CPU 时间片切换是 OS 随时可能发生的，如果没有线程私有的 PC，切回来就找不到下一条字节码；如果没有私有栈，A 的局部变量会被 B 覆盖。这是并发能正确工作的物理基础。我们调 `-Xss` 时要权衡：栈越大越能扛深递归，但同样内存能开的线程数就越少，1M 栈 + 1000 线程就是 1G。」
 
 ---
 
-**④ 直接内存（Direct Memory）**
-- NIO 的 `ByteBuffer.allocateDirect()` 用堆外内存，不受 JVM 堆大小控制，但受 `-XX:MaxDirectMemorySize` 限制。
+#### 深度点 ③：为什么虚拟机栈/本地方法栈是线程私有的？
+
+- 栈帧存局部变量、操作数栈。每个方法调用一个栈帧。私有保证各线程方法调用互不干扰。
+- 栈深固定（-Xss，默认 512K-1M），递归太深 → `StackOverflowError`。
+- 局部变量表以 **变量槽（Slot）** 为单位，32 位类型占 1 槽，64 位（long/double）占 2 槽。
+
+**⑤ 面试怎么说**
+
+「虚拟机栈线程私有，是为了方法调用的局部变量/操作数栈互不干扰。栈帧存局部变量表、操作数栈、动态链接、方法返回地址。栈深受 -Xss 限制，递归过深会 StackOverflowError。我调 -Xss 时会权衡：栈越大越能扛深递归，但同样内存能开的线程数就越少。」
+
+---
+
+#### 深度点 ④：直接内存（Direct Memory）
+
+**① 为什么 / 痛点**
+
+NIO 的 `ByteBuffer.allocateDirect()` 用堆外内存，不受 JVM 堆大小控制，但受 `-XX:MaxDirectMemorySize` 限制。
 - **优点**：减少一次内核态→用户态拷贝（零拷贝），GC 不扫描（减少 GC 压力）。
 - **缺点**：分配/回收成本高（Unsafe.allocateMemory），无法被 JVM 直接管理（Netty 用 PoolChunkList 池化）。
 - **排查**：`-XX:NativeMemoryTracking=detail` + `jcmd <pid> VM.native_memory`。
+
+**② 怎么做 / 原理图解**
+
+直接内存位于 JVM 堆外、由操作系统管理，NIO 通过 `Unsafe.allocateMemory` 直接分配。读写时省去堆↔内核缓冲的一次 CPU 拷贝，代价是分配/回收走系统调用，必须池化复用。
+
+**③ 代码验证 / 代码示例**
 
 ```java
 // Netty 风格的堆外内存分配（演示，生产用 ByteBufAllocator）
@@ -105,20 +160,35 @@ ByteBuffer direct = ByteBuffer.allocateDirect(1024 * 1024); // 1MB 堆外
 // 注意：分配和释放都是系统调用，比 HeapByteBuffer 慢，但 IO 时省一次拷贝
 ```
 
-**【面试话术】**
-「直接内存我在企迈的高并发网关层用过。我们有个门店商品聚合接口，高峰 QPS 上万，原来用 HeapByteBuffer 走 NIO，每次网络读写都要在堆和内核缓冲之间多拷一次，GC 压力也大。后来换 Netty 的 PooledDirectByteBuf，堆外池化，既省了那次拷贝又避开了 GC 扫描。代价是分配回收贵，所以一定要池化复用，不然反而更慢。排查堆外泄漏我用 `-XX:NativeMemoryTracking=detail` + `jcmd VM.native_memory summary`。」
+```bash
+# 排查堆外内存
+-XX:NativeMemoryTracking=detail
+jcmd <pid> VM.native_memory summary
+```
+
+**④ 真实案例**
+
+直接内存在高并发网关层用过。门店商品聚合接口，高峰 QPS 上万，原来用 HeapByteBuffer 走 NIO，每次网络读写都要在堆和内核缓冲之间多拷一次，GC 压力也大。后来换 Netty 的 PooledDirectByteBuf，堆外池化，既省了那次拷贝又避开了 GC 扫描。
+
+**⑤ 面试怎么说**
+
+「直接内存我在高并发网关层用过。门店商品聚合接口，高峰 QPS 上万，原来用 HeapByteBuffer 走 NIO，每次网络读写都要在堆和内核缓冲之间多拷一次，GC 压力也大。后来换 Netty 的 PooledDirectByteBuf，堆外池化，既省了那次拷贝又避开了 GC 扫描。代价是分配回收贵，所以一定要池化复用，不然反而更慢。排查堆外泄漏我用 `-XX:NativeMemoryTracking=detail` + `jcmd VM.native_memory summary`。」
 
 ---
 
-**⑤ 对象一定分配在堆上吗？** 🔴（高频追问，原版太简，此处大幅扩展）
+#### 深度点 ⑤：对象一定分配在堆上吗？（逃逸分析）🔴 高频追问
 
-**痛点/动机**：堆分配意味着必然经过 GC（分配是快的，但 GC 回收是 STW 的）。如果一些对象只在方法内部用、用完就死，为什么还要污染堆、还要 GC 扫描？JVM 想：「能不能让这些短命对象压根不进堆？」
+**① 为什么 / 痛点**
+
+堆分配意味着必然经过 GC（分配是快的，但 GC 回收是 STW 的）。如果一些对象只在方法内部用、用完就死，为什么还要污染堆、还要 GC 扫描？JVM 想：「能不能让这些短命对象压根不进堆？」
 
 **逃逸分析（Escape Analysis，-XX:+DoEscapeAnalysis，JDK6+ 默认开）**：
 分析一个对象的"作用域是否逃出方法/线程"，分三级：
 - **未逃逸（NoEscape）**：对象只在方法内使用 → 可**栈上分配**（实际是**标量替换 Scalar Replacement**）+ 锁消除。
 - **方法逃逸（ArgEscape/GlobalEscape）**：对象被 return 或赋给静态字段 → 必须堆分配。
 - **线程逃逸**：对象被其他线程访问（如存入共享容器）→ 堆分配。
+
+**② 怎么做 / 原理图解**
 
 **标量替换图解**（这才是"栈上分配"的真相——Hotspot 并不真的在栈上放对象，而是把对象打散成基本类型局部变量）：
 ```
@@ -131,6 +201,8 @@ void calc() {                        void calc() {
                                     }
 ```
 
+**③ 代码验证 / 代码示例**
+
 **锁消除（Lock Elision）**：若同步块的对象未逃逸（如方法内 `new Object()` 当锁），JIT 直接删除 synchronized。
 ```java
 // StringBuffer 是同步的，但如果 sb 没逃出方法，synchronized 被消除
@@ -141,7 +213,6 @@ public String concat(String a, String b) {
 }
 ```
 
-**验证方法**：
 ```bash
 # 关闭逃逸分析对比（默认开启）
 -XX:-DoEscapeAnalysis -XX:+PrintEscapeAnalysis -XX:+DoEscapeAnalysis
@@ -149,16 +220,24 @@ public String concat(String a, String b) {
 # JVM 输出标量替换信息：-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining
 ```
 
-**【面试话术】**
-「严格说『栈上分配』是个通俗说法，Hotspot 真正做的是逃逸分析 + 标量替换。我在企迈对优惠券计算引擎做过一次性能优化——计算函数里频繁 new 一堆临时 `DiscountContext`、`CouponMeta` 对象，Profiler 看堆分配很大但 GC 又都能立刻回收。我确认这些对象没逃逸出方法（没 return、没赋给字段），所以 -XX:+DoEscapeAnalysis 默认开着时，JVM 把它们标量替换成栈上的 int/String 局部变量，省掉了堆分配和 YGC 扫描。我还顺手验证过锁消除——方法内 new StringBuffer 当字符串拼接，JIT 直接把 synchronized 抹了。逃逸分析是 JDK8 之后默认开的，但有些极特殊场景（对象逃逸边界复杂）JIT 可能放弃分析退化成堆分配，这种时候要看 -XX:+PrintEscapeAnalysis 输出。」
+**④ 真实案例**
+
+对优惠券计算引擎做过一次性能优化——计算函数里频繁 new 一堆临时 `DiscountContext`、`CouponMeta` 对象，Profiler 看堆分配很大但 GC 又都能立刻回收。确认这些对象没逃逸出方法（没 return、没赋给字段），所以 -XX:+DoEscapeAnalysis 默认开着时，JVM 把它们标量替换成栈上的 int/String 局部变量，省掉了堆分配和 YGC 扫描。还顺手验证过锁消除——方法内 new StringBuffer 当字符串拼接，JIT 直接把 synchronized 抹了。
+
+**⑤ 面试怎么说**
+
+「严格说『栈上分配』是个通俗说法，Hotspot 真正做的是逃逸分析 + 标量替换。我对优惠券计算引擎做过一次性能优化——计算函数里频繁 new 一堆临时 `DiscountContext`、`CouponMeta` 对象，Profiler 看堆分配很大但 GC 又都能立刻回收。我确认这些对象没逃逸出方法（没 return、没赋给字段），所以 -XX:+DoEscapeAnalysis 默认开着时，JVM 把它们标量替换成栈上的 int/String 局部变量，省掉了堆分配和 YGC 扫描。我还顺手验证过锁消除——方法内 new StringBuffer 当字符串拼接，JIT 直接把 synchronized 抹了。逃逸分析是 JDK8 之后默认开的，但有些极特殊场景（对象逃逸边界复杂）JIT 可能放弃分析退化成堆分配，这种时候要看 -XX:+PrintEscapeAnalysis 输出。」
 
 ---
 
-**⑥ TLAB（Thread Local Allocation Buffer）** 🟡（原版太简，此处扩展）
+#### 深度点 ⑥：TLAB（Thread Local Allocation Buffer）🟡
 
-**痛点/动机**：堆是所有线程共享的，但 `new` 对象绝大多数落在 Eden 区。如果每个 `new` 都要 CAS 抢"Eden 指针"，多线程高并发分配时 CAS 失败重试会非常严重（想想高峰期每秒几十万次 `new`）。怎么办？**给每个线程一块 Eden 私有缓冲区，自己分自己的，分满了再去抢新的**——这就是 TLAB。
+**① 为什么 / 痛点**
 
-**原理图解**：
+堆是所有线程共享的，但 `new` 对象绝大多数落在 Eden 区。如果每个 `new` 都要 CAS 抢"Eden 指针"，多线程高并发分配时 CAS 失败重试会非常严重（想想高峰期每秒几十万次 `new`）。怎么办？**给每个线程一块 Eden 私有缓冲区，自己分自己的，分满了再去抢新的**——这就是 TLAB。
+
+**② 怎么做 / 原理图解**
+
 ```
 Eden 区被切成多块 TLAB（每个线程一块私有）：
 ┌────────────────────────────────────────────────────────────┐
@@ -178,24 +257,38 @@ TLAB-A 满了 → CAS 向 Eden 申请一块新的 TLAB（这是低频操作）
 2. TLAB 满了 → slow path：CAS 申请新 TLAB；若 Eden 也不够 → 触发 Minor GC。
 3. 默认 `-XX:+UseTLAB` 开启。TLAB 占 Eden 的比例 `-XX:TLABWasteTargetPercent=1`（默认 1%）。
 
-**为什么 TLAB 让堆分配"看起来无锁"？**
-因为 99% 的 `new` 走 fast path（自己 TLAB 内指针移动），只有 TLAB 耗尽时才竞争一次。这让 JVM 的对象分配速度接近 `malloc` 的最优情况。
+为什么 TLAB 让堆分配"看起来无锁"？因为 99% 的 `new` 走 fast path（自己 TLAB 内指针移动），只有 TLAB 耗尽时才竞争一次。这让 JVM 的对象分配速度接近 `malloc` 的最优情况。
 
-**【面试话术】**
-「TLAB 解决的是『多线程并发 new 对象时的指针竞争』问题。堆虽然是共享的，但 Hotspot 给每个线程在 Eden 区划了一块私有 TLAB，对象优先在自己的 TLAB 里用指针碰撞分配——完全无锁无 CAS。只有 TLAB 耗尽了才去 Eden 抢新的，竞争频率从『每次 new』降到『每几千次 new 一次』。我们企迈高峰期一秒能产生几十万个小对象（订单流水、计算中间态），正是因为 TLAB + 逃逸分析标量替换，堆分配基本不成为瓶颈。这个默认是开的，不用专门调，除非你想看 -XX:+PrintTLAB 的分配日志做深入调优。」
+**③ 代码验证 / 代码示例**
+
+```bash
+-XX:+UseTLAB                       # 默认开启
+-XX:TLABWasteTargetPercent=1       # TLAB 占 Eden 比例（默认 1%）
+-XX:+PrintTLAB                     # 打印 TLAB 分配日志（调优时用）
+```
+
+**④ 真实案例**
+
+高峰期一秒能产生几十万个小对象（订单流水、计算中间态），正是因为 TLAB + 逃逸分析标量替换，堆分配基本不成为瓶颈。
+
+**⑤ 面试怎么说**
+
+「TLAB 解决的是『多线程并发 new 对象时的指针竞争』问题。堆虽然是共享的，但 Hotspot 给每个线程在 Eden 区划了一块私有 TLAB，对象优先在自己的 TLAB 里用指针碰撞分配——完全无锁无 CAS。只有 TLAB 耗尽了才去 Eden 抢新的，竞争频率从『每次 new』降到『每几千次 new 一次』。我们高峰期一秒能产生几十万个小对象（订单流水、计算中间态），正是因为 TLAB + 逃逸分析标量替换，堆分配基本不成为瓶颈。这个默认是开的，不用专门调，除非你想看 -XX:+PrintTLAB 的分配日志做深入调优。」
 
 ---
 
 ## 1.2 对象的创建全过程（6 步）🔴
 
-### 【为什么/痛点】为什么要分 6 步，而不是一步到位？
+> 本节是「流程/清单型」内容，6 步流程和对象内存布局保持原样；流程的动机与案例部分按 5 维度组织讲解。
 
-因为 JVM 要兼顾**性能（快速分配）+ 安全（内存初始化）+ 灵活（支持 GC 和锁）**：
+**① 为什么 / 痛点**
+
+为什么要分 6 步，而不是一步到位？因为 JVM 要兼顾**性能（快速分配）+ 安全（内存初始化）+ 灵活（支持 GC 和锁）**：
 - 内存必须先清零，否则字段会有脏值（其他对象遗留的数据），这是安全红线。
 - 对象头必须先设置，因为 GC、synchronized、hashCode 全依赖它。
 - 构造方法最后才执行，保证字段赋值时对象结构已完整。
 
-### 【原理图解】
+**② 怎么做 / 原理图解**
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -255,30 +348,35 @@ TLAB-A 满了 → CAS 向 Eden 申请一块新的 TLAB（这是低频操作）
 GC标记：  空 | 11
 ```
 
-### 【真实案例 - 企迈茶饮】
-优惠券计算引擎里有大量 `DiscountResult` 短命对象。用 JOL（Java Object Layout）分析：
+**③ 代码验证 / 代码示例**
+
 ```java
 // 引入 org.openjdk.jol:jol-core
 System.out.println(ClassLayout.parseClass(DiscountResult.class).toPrintable());
 // 输出可见：HEADER 12B + 字段 + padding = 24B（刚好 8 的倍数）
 ```
-发现一个有 3 个 long + 2 个引用的小对象是 40B，因为没对齐 padding 到 48B。把字段顺序调整后无变化（Hotspot 自动重排），但确认关闭指针压缩会多 8B，所以**生产坚持开 `-XX:+UseCompressedOops`**（堆 <32G 默认开）。
 
-### 【面试话术】
-「对象创建这 6 步我背得很熟，但我想强调两个面试常被追问的点。第一，**指针碰撞 vs 空闲列表取决于收集器**——G1/Serial 用复制整理所以指针碰撞，CMS 用标记-清除有碎片只能空闲列表。第二，**步骤 4 设对象头和步骤 5 构造之间的缝隙**就是 DCL 单例必须 volatile 的根因——new 实际是『分配→设对象头→赋引用→构造』，赋引用（步骤 6 的指针写入）如果和构造（步骤 5）重排，其他线程会拿到半初始化对象。我用 JOL 实测过我们优惠券的 DiscountResult 对象布局，确认了字段重排和指针压缩的效果，开了 UseCompressedOops 后对象头从 16B 压到 12B，对百万级对象的小内存场景省内存很明显。」
+**④ 真实案例**
+
+优惠券计算引擎里有大量 `DiscountResult` 短命对象。用 JOL（Java Object Layout）分析：发现一个有 3 个 long + 2 个引用的小对象是 40B，因为没对齐 padding 到 48B。把字段顺序调整后无变化（Hotspot 自动重排），但确认关闭指针压缩会多 8B，所以**生产坚持开 `-XX:+UseCompressedOops`**（堆 <32G 默认开）。
+
+**⑤ 面试怎么说**
+
+「对象创建这 6 步我背得很熟，但我想强调两个面试常被追问的点。第一，**指针碰撞 vs 空闲列表取决于收集器**——G1/Serial 用复制整理所以指针碰撞，CMS 用标记-清除有碎片只能空闲列表。第二，**步骤 4 设对象头和步骤 5 构造之间的缝隙**就是 DCL 单例必须 volatile 的根因——new 实际是『分配→设对象头→赋引用→构造』，赋引用（步骤 6 的指针写入）如果和构造（步骤 5）重排，其他线程会拿到半初始化对象。我用 JOL 实测过优惠券的 DiscountResult 对象布局，确认了字段重排和指针压缩的效果，开了 UseCompressedOops 后对象头从 16B 压到 12B，对百万级对象的小内存场景省内存很明显。」
 
 ---
 
 ## 1.3 GC 算法深度对比
 
-### 【为什么/痛点】为什么有这么多 GC 算法？
+**① 为什么 / 痛点**
 
-因为没有一种算法能同时满足"无碎片 + 快 + 不浪费空间"：
+为什么有这么多 GC 算法？因为没有一种算法能同时满足"无碎片 + 快 + 不浪费空间"：
 - 新生代对象朝生夕死（95%+ 立刻死）→ 复制算法（存活少，复制成本低）。
 - 老年代对象长寿 → 标记-清除（CMS 快但有碎片）或标记-整理（无碎片但慢）。
 - 不同代用不同算法 = 分代收集，工程上的折中。
 
-### 【对比表】
+**② 怎么做 / 原理图解**
+
 | 算法 | 过程 | 优 | 劣 | 适用 |
 |------|------|----|----|------|
 | 标记-清除 Mark-Sweep | ①从 GC Roots 遍历标记存活 ②清除未标记 | 简单、无移动 | **碎片**、效率不稳（存活多时清除慢）| CMS |
@@ -286,7 +384,7 @@ System.out.println(ClassLayout.parseClass(DiscountResult.class).toPrintable());
 | 标记-整理 Mark-Compact | 标记 → 存活对象向一端移动 | 无碎片、不浪费 | 移动成本高、STW 长 | 老年代 |
 | 分代收集 Generational | 新生代复制 + 老年代标记整理 | 综合最优 | 实现复杂 | 主流 |
 
-### 🔴 GC Roots（根对象）完整清单
+#### 🔴 GC Roots（根对象）完整清单
 
 **为什么需要 GC Roots？** 可达性分析从 Roots 出发遍历对象图，不可达的 = 垃圾。没有 Roots 就没有起点，整个对象图无法判断谁死谁活。
 
@@ -300,7 +398,7 @@ GC Roots 包括：
 7. **JMXBean、JVMTI**（追踪本地代码的对象）
 8. **分代回收的"临时 GC Roots"**：跨代引用处理时，老年代作为 Roots 扫描成本高，用 **Remembered Set / Card Table** 记录跨代引用，避免全堆扫描。
 
-### 跨代引用问题（Card Table + Write Barrier）🟡
+#### 跨代引用问题（Card Table + Write Barrier）🟡
 
 **痛点**：Minor GC 只回收新生代，但老年代可能持有新生代对象的引用。如果不处理，要么"全堆扫描老年代"（代价巨大），要么"漏回收"（保留本该回收的新生代对象，导致内存泄漏）。
 
@@ -321,6 +419,8 @@ Card Table（字节数组，1 byte 对应 1 card）：
    干净            有跨代引用，Minor GC 只扫这张卡
 ```
 
+**③ 代码验证 / 代码示例**
+
 **写屏障（Write Barrier）伪代码**：
 ```cpp
 // Hotspot 在每次引用赋值（o.field = value）后插入
@@ -331,8 +431,13 @@ void post_write_barrier(Object o, Object value) {
 }
 ```
 
-### 【面试话术】
-「GC Roots 这个问题，我会先讲『为什么需要』——可达性分析必须有个起点。然后我会强调一个面试加分点：**『跨代引用 + Card Table』其实是『用写屏障换扫描效率』的经典工程权衡**。Minor GC 本来要回收新生代，但老年代可能持着新生代的引用，全扫老年代代价太大。Card Table 把老年代切成 512B 一张卡，写屏障在老年代写新对象引用时把对应卡标 dirty，Minor GC 只扫 dirty 卡。G1 更进一步，每个 Region 维护 RSet 记录『谁指向我』，避免全堆扫。我们企迈用的 G1，遇到过 RSet 维护成本高（写屏障开销）导致吞吐下降的情况，那时就要权衡 Region 大小和 RSet 精度。」
+**④ 真实案例**
+
+生产用的 G1，遇到过 RSet 维护成本高（写屏障开销）导致吞吐下降的情况，那时就要权衡 Region 大小和 RSet 精度。
+
+**⑤ 面试怎么说**
+
+「GC Roots 这个问题，我会先讲『为什么需要』——可达性分析必须有个起点。然后我会强调一个面试加分点：**『跨代引用 + Card Table』其实是『用写屏障换扫描效率』的经典工程权衡**。Minor GC 本来要回收新生代，但老年代可能持着新生代的引用，全扫老年代代价太大。Card Table 把老年代切成 512B 一张卡，写屏障在老年代写新对象引用时把对应卡标 dirty，Minor GC 只扫 dirty 卡。G1 更进一步，每个 Region 维护 RSet 记录『谁指向我』，避免全堆扫。我们生产用的 G1，遇到过 RSet 维护成本高（写屏障开销）导致吞吐下降的情况，那时就要权衡 Region 大小和 RSet 精度。」
 
 ---
 
@@ -350,8 +455,12 @@ Parallel Scavenge ── Parallel Old (吞吐量优先)
 
 ### ① CMS（Concurrent Mark Sweep）🔴 必精通（虽已废弃但常考）
 
+**① 为什么 / 痛点**
+
 **设计目标**：低停顿（并发收集，STW 短）。
 **痛点**：早期 Web 服务对响应时间敏感，Serial/Parallel 的 STW 让接口卡顿，需要"边跑边收"。
+
+**② 怎么做 / 原理图解**
 
 **四阶段**：
 ```
@@ -372,15 +481,35 @@ Parallel Scavenge ── Parallel Old (吞吐量优先)
 3. **空间碎片**（标记-清除）→ 大对象分配困难 → 触发 Full GC。
 4. **Concurrent Mode Failure**：并发阶段老年代满了 → 退化为 Serial Old（单线程 STW Full GC），停顿极长。
 
-**为什么 JDK9 废弃 CMS？** 碎片化 + 浮动垃圾导致频繁 Full GC，维护成本高，G1 更成熟。
+为什么 JDK9 废弃 CMS？碎片化 + 浮动垃圾导致频繁 Full GC，维护成本高，G1 更成熟。
 
-**【面试话术】**
-「CMS 我会重点讲它的并发设计：初始标记和重新标记 STW 但极短，真正耗时的并发标记和并发清除都是和业务线程并行的。但代价是四个痛点——CPU 抢占、浮动垃圾、碎片、Concurrent Mode Failure。CMS 退化是最危险的，老年代在并发清除阶段满了就直接退 Serial Old 单线程 Full GC，停顿几秒。我们企迈在 JDK8 早期还用 CMS，配 `-XX:CMSInitiatingOccupancyFraction=70` 控制触发时机，但碎片问题最终让我们在 JDK9+ 全面切 G1。CMS 在 JDK14 彻底移除了，但面试还是会考，因为它代表了『并发收集器』的鼻祖设计。」
+**③ 代码验证 / 代码示例**
+
+```bash
+-XX:+UseConcMarkSweepGC
+-XX:CMSInitiatingOccupancyFraction=70    # 老年代占用 70% 触发 CMS
+-XX:+UseCMSInitiatingOccupancyOnly       # 用上面的固定阈值，不动态调整
+-XX:+CMSParallelRemarkEnabled            # 并行重新标记
+```
+
+**④ 真实案例**
+
+项目在 JDK8 早期还用 CMS，配 `-XX:CMSInitiatingOccupancyFraction=70` 控制触发时机，但碎片问题最终在 JDK9+ 全面切 G1。
+
+**⑤ 面试怎么说**
+
+「CMS 我会重点讲它的并发设计：初始标记和重新标记 STW 但极短，真正耗时的并发标记和并发清除都是和业务线程并行的。但代价是四个痛点——CPU 抢占、浮动垃圾、碎片、Concurrent Mode Failure。CMS 退化是最危险的，老年代在并发清除阶段满了就直接退 Serial Old 单线程 Full GC，停顿几秒。我们项目在 JDK8 早期还用 CMS，配 `-XX:CMSInitiatingOccupancyFraction=70` 控制触发时机，但碎片问题最终让我们在 JDK9+ 全面切 G1。CMS 在 JDK14 彻底移除了，但面试还是会考，因为它代表了『并发收集器』的鼻祖设计。」
+
+---
 
 ### ② G1（Garbage First）🔴🔴 必精通（JDK9 默认）
 
+**① 为什么 / 痛点**
+
 **核心思想**：把堆切成 Region，跟踪每个 Region 的回收价值（垃圾占比），**优先回收价值高的**（Garbage First）。
 **痛点**：CMS 碎片严重、Parallel 停顿长。G1 用 Region 化 + 混合回收，在"停顿可控 + 高吞吐 + 无碎片"间找平衡。
+
+**② 怎么做 / 原理图解**
 
 **内存模型**：
 ```
@@ -439,6 +568,8 @@ G1 用 SATB（Snapshot-At-The-Beginning）：
   - SATB（G1）：拦截"断开引用"→ 条件2，删除时记下，重新标记当存活
 ```
 
+**③ 代码验证 / 代码示例**
+
 **关键参数**：
 ```bash
 -XX:+UseG1GC
@@ -459,16 +590,27 @@ G1 用 SATB（Snapshot-At-The-Beginning）：
 4. Humongous Allocation 失败。
 → 退化为 **JDK10 前单线程、JDK10+ 多线程**的 Serial Full GC，停顿几秒到几十秒。
 
-**什么时候用 G1？** 堆 >6GB、停顿目标 0.1-0.5s。
+什么时候用 G1？堆 >6GB、停顿目标 0.1-0.5s。
 
-**【面试话术】**
-「G1 我在企迈生产环境跑 JDK9+，主战场。核心是 Region 化 + Garbage First 策略——堆切成 2048 个 Region，逻辑分代但不物理连续，每次 Young/Mixed GC 选垃圾比例高的 Region 组成 CSet 回收，配合 MaxGCPauseMillis 软目标做停顿预测。G1 用 SATB 解决三色标记漏标，本质是『拍快照 + 拦截引用删除』，宁可多标不漏标。最坑的是 Full GC 退化——我们踩过 Mixed GC 跟不上分配速度导致退 Serial Full GC 停顿 5 秒的坑，根因是本地缓存没设淘汰老年代涨太快。后来调 IHOP 到 35（更早触发并发标记）+ 业务层 Caffeine LRU 才稳。我深度调过 G1MixedGCLiveThresholdPercent，默认 85 太严，Region 存活对象超 85% 就不回收，碎片越积越多，调到 65 放宽回收条件，Mixed GC 频率降一个数量级。」
+**④ 真实案例**
+
+生产环境跑 JDK9+，主战场。踩过 Mixed GC 跟不上分配速度导致退 Serial Full GC 停顿 5 秒的坑，根因是本地缓存没设淘汰老年代涨太快。后来调 IHOP 到 35（更早触发并发标记）+ 业务层 Caffeine LRU 才稳。深度调过 G1MixedGCLiveThresholdPercent，默认 85 太严，Region 存活对象超 85% 就不回收，碎片越积越多，调到 65 放宽回收条件，Mixed GC 频率降一个数量级。
+
+**⑤ 面试怎么说**
+
+「G1 我在生产环境跑 JDK9+，主战场。核心是 Region 化 + Garbage First 策略——堆切成 2048 个 Region，逻辑分代但不物理连续，每次 Young/Mixed GC 选垃圾比例高的 Region 组成 CSet 回收，配合 MaxGCPauseMillis 软目标做停顿预测。G1 用 SATB 解决三色标记漏标，本质是『拍快照 + 拦截引用删除』，宁可多标不漏标。最坑的是 Full GC 退化——我们踩过 Mixed GC 跟不上分配速度导致退 Serial Full GC 停顿 5 秒的坑，根因是本地缓存没设淘汰老年代涨太快。后来调 IHOP 到 35（更早触发并发标记）+ 业务层 Caffeine LRU 才稳。我深度调过 G1MixedGCLiveThresholdPercent，默认 85 太严，Region 存活对象超 85% 就不回收，碎片越积越多，调到 65 放宽回收条件，Mixed GC 频率降一个数量级。」
+
+---
 
 ### ③ ZGC（Z Garbage Collector）🔴（JDK15 转正）
+
+**① 为什么 / 痛点**
 
 **痛点**：G1 的停顿在 100-200ms 级别，对延迟敏感场景（金融交易、实时推荐）仍不够。需要"与堆大小无关的亚毫秒停顿"。
 
 **目标**：停顿 <1ms（JDK16+），与堆大小无关（TB 级堆也能）。
+
+**② 怎么做 / 原理图解**
 
 **两大核心技术**：
 1. **着色指针（Colored Pointers）**：
@@ -499,13 +641,51 @@ GC 转移对象时无需 STW，因为读屏障会按需修正
 **代价**：吞吐略降（~10%，读屏障开销）。
 **适用**：超大堆、低延迟要求极致（金融交易、实时）。
 
-**【面试话术】**
-「ZGC 的精髓是『把 GC 状态编码进指针本身』。64 位指针高 4 位存 Marked0/Marked1/Remapped 颜色，GC 改指针标志位就能标记/转移，不用动对象头。配合读屏障——每次从堆读引用都检查颜色，过期就自愈式转移对象并更新指针。这样 GC 和应用能真正并发移动对象，几乎没有 STW。代价是吞吐降 10%（读屏障开销）。我们在企迈没用 ZGC（堆才 8G，G1 够用），但我研究过美团、字节在 100G+ 堆上用 ZGC 的实践，停顿稳定 <5ms。ZGC JDK15 转正，JDK16 + Generational ZGC 进一步优化，是未来的方向。」
+**③ 代码验证 / 代码示例**
+
+```bash
+-XX:+UseZGC                         # JDK15+ 直接启用
+-XX:+UseNUMA                        # NUMA 感知
+-XX:SoftMaxHeapSize=...             # 软上限，ZGC 尽量不超过
+# JDK16+ 的 Generational ZGC
+-XX:+UseZGC -XX:+ZGenerational
+```
+
+**④ 真实案例**
+
+生产没用 ZGC（堆才 8G，G1 够用），但研究过美团、字节在 100G+ 堆上用 ZGC 的实践，停顿稳定 <5ms。
+
+**⑤ 面试怎么说**
+
+「ZGC 的精髓是『把 GC 状态编码进指针本身』。64 位指针高 4 位存 Marked0/Marked1/Remapped 颜色，GC 改指针标志位就能标记/转移，不用动对象头。配合读屏障——每次从堆读引用都检查颜色，过期就自愈式转移对象并更新指针。这样 GC 和应用能真正并发移动对象，几乎没有 STW。代价是吞吐降 10%（读屏障开销）。我们生产没用 ZGC（堆才 8G，G1 够用），但我研究过美团、字节在 100G+ 堆上用 ZGC 的实践，停顿稳定 <5ms。ZGC JDK15 转正，JDK16 + Generational ZGC 进一步优化，是未来的方向。」
+
+---
 
 ### ④ Shenandoah（RedHat，JDK12+）
-- 与 ZGC 类似（亚毫秒停顿），用** Brooks 转发指针**（每个对象多一个指针指向自己或新副本）而非着色指针。
-- OpenJDK 自带，Hotspot 用 ZGC 较多。
-- Brooks 指针的代价：每个对象多吃 8 字节 + 每次访问多一次间接寻址。
+
+**① 为什么 / 痛点**
+
+与 ZGC 类似（亚毫秒停顿），RedHat 主导，目标是与 ZGC 一样实现"并发整理"。
+
+**② 怎么做 / 原理图解**
+
+用** Brooks 转发指针**（每个对象多一个指针指向自己或新副本）而非着色指针。
+
+**③ 代码验证 / 代码示例**
+
+```bash
+-XX:+UseShenandoahGC    # OpenJDK 自带（RedHat 构建）
+```
+
+**④ 真实案例**
+
+OpenJDK 自带，Hotspot 用 ZGC 较多，生产实践较少见，企业级多在 RedHat 生态使用。
+
+**⑤ 面试怎么说**
+
+「Shenandoah 和 ZGC 目标一样——亚毫秒停顿的并发整理，但实现路径不同。ZGC 用着色指针（把状态塞进指针高位），Shenandoah 用 Brooks 转发指针（每个对象多吃一个 8 字节指针，指向自己或新副本）。Brooks 指针的代价是每个对象多吃 8 字节 + 每次访问多一次间接寻址。OpenJDK 自带，但生产用得少，Hotspot 生态以 ZGC 为主。」
+
+---
 
 ### 收集器选型决策树 🔴
 ```
@@ -527,11 +707,13 @@ GC 转移对象时无需 STW，因为读屏障会按需修正
 
 ## 1.5 内存分配策略（对象进新生代还是老年代？）
 
-### 【为什么/痛点】为什么要分代 + 分配策略？
+**① 为什么 / 痛点**
 
-因为对象的"寿命"分布极度不均（90%+ 朝生夕死）。如果不分代，每次 GC 扫描整个堆；分代后，新生代频繁小回收（Minor GC 快），老年代偶发大回收（Full GC 慢但少见）。**分代是"用工程复杂度换 GC 效率"的核心权衡**。
+为什么要分代 + 分配策略？因为对象的"寿命"分布极度不均（90%+ 朝生夕死）。如果不分代，每次 GC 扫描整个堆；分代后，新生代频繁小回收（Minor GC 快），老年代偶发大回收（Full GC 慢但少见）。**分代是"用工程复杂度换 GC 效率"的核心权衡**。
 
-### 【规则】
+**② 怎么做 / 原理图解**
+
+**分配规则**：
 ```
 1. 对象优先在 Eden 分配（TLAB）
    Minor GC：Eden 满触发，Eden+S0 存活复制到 S1，年龄+1
@@ -554,21 +736,35 @@ GC 转移对象时无需 STW，因为读屏障会按需修正
 
 **动态年龄判断的真实意义**：避免 Survivor 溢出。如果某次大量对象同龄（如批量缓存预热），Survivor 可能装不下，按"年龄 >= 阈值"批量晋升老年代。
 
-### 【真实案例 - 企迈茶饮】
+**③ 代码验证 / 代码示例**
+
+```bash
+-XX:MaxTenuringThreshold=15         # 晋升老年代年龄阈值（CMS 为 6）
+-XX:PretenureSizeThreshold=1048576  # 大于该值的对象直接进老年代（字节）
+-XX:SurvivorRatio=8                 # Eden:S0:S1 = 8:1:1
+-XX:-HandlePromotionFailure         # 是否允许担保失败（JDK6 后默认允许）
+# 用 jstat -gc <pid> 1000 看 S0/S1/Eden/O 区变化验证
+```
+
+**④ 真实案例**
+
 门店商品批量预热时一次性 new 几万个 `ProductCache` 对象，Survivor 装不下，触发动态年龄判断，这批对象直接晋升老年代。本来是"短期缓存"，结果进了老年代，撑了一周后 Mixed GC 频繁。**解决**：预热改成流式 + 限制批次大小，避免大批同龄对象。
 
-### 【面试话术】
-「分配策略我会讲 5 条规则，但面试官最爱挖的是『动态年龄判断』和『空间分配担保』。动态年龄判断是 JVM 的安全阀——Survivor 中同龄对象总和超 50% 就批量晋升，防止 Survivor 溢出。空间分配担保是 Minor GC 前的预检查，老年代放不下所有新生代存活对象 + 不允许担保失败就直接 Full GC。我踩过坑：企迈门店商品批量预热一次 new 几万同龄对象，全被动态年龄判断轰进老年代，结果本来短命的缓存对象撑在老年代一周，Mixed GC 频繁。后来改流式分批预热才根治。这个教训是『不要一次创建大批同龄对象，否则 JVM 的代际假设会被打乱』。」
+**⑤ 面试怎么说**
+
+「分配策略我会讲 5 条规则，但面试官最爱挖的是『动态年龄判断』和『空间分配担保』。动态年龄判断是 JVM 的安全阀——Survivor 中同龄对象总和超 50% 就批量晋升，防止 Survivor 溢出。空间分配担保是 Minor GC 前的预检查，老年代放不下所有新生代存活对象 + 不允许担保失败就直接 Full GC。我踩过坑：门店商品批量预热一次 new 几万同龄对象，全被动态年龄判断轰进老年代，结果本来短命的缓存对象撑在老年代一周，Mixed GC 频繁。后来改流式分批预热才根治。这个教训是『不要一次创建大批同龄对象，否则 JVM 的代际假设会被打乱』。」
 
 ---
 
 ## 1.6 类加载机制（详解 + 破坏双亲委派实战）
 
-### 【为什么/痛点】为什么要类加载机制 + 双亲委派？
+**① 为什么 / 痛点**
 
-两个核心痛点：
+为什么要类加载机制 + 双亲委派？两个核心痛点：
 1. **安全**：如果用户能自己写个 `java.lang.String` 替换核心类，整个 JVM 安全体系崩塌。双亲委派保证核心类必须由 Bootstrap 加载。
 2. **唯一性**：同一个类被同一个加载器加载只会产生一个 Class 对象，避免"两个 String 类不兼容"的混乱。
+
+**② 怎么做 / 原理图解**
 
 ### 类加载 7 步全过程
 
@@ -621,6 +817,8 @@ GC 转移对象时无需 STW，因为读屏障会按需修正
               ↑ 委派
          自定义 ClassLoader
 ```
+
+**③ 代码验证 / 代码示例**
 
 **委派逻辑**（ClassLoader.loadClass）：
 ```java
@@ -684,19 +882,34 @@ Tomcat 类加载结构：
 **场景 5：SPI（ServiceLoader）**
 - 同 JDBC，所有 SPI 都用 TCCL。
 
-### 【真实案例 - 企迈茶饮】
-我们用 Tomcat 部署，多个 SaaS 模块（订单、促销、券）依赖不同版本的工具库。WebAppClassLoader 的隔离保证各模块互不影响。另外线上排查"类冲突"用过 `arthas` 的 `sc -d 类名` 看是哪个 ClassLoader 加载的，定位 jar 包冲突。
+**④ 真实案例**
 
-### 【面试话术】
-「双亲委派我会先讲清『委派逻辑』——loadClass 先 findLoadedClass，再 parent.loadClass，最后自己 findClass。然后讲『为什么要委派』——安全（防核心类篡改）+ 唯一性（同类同加载器 = 同 Class 对象）。重点讲破坏场景：JDBC 用 TCCL 反向加载 SPI 实现，因为 Bootstrap 加载的 DriverManager 没法向下委派；Tomcat WebAppClassLoader 优先自己加载实现应用隔离；OSGi 网状结构彻底打破树状；热部署靠新 ClassLoader 重加载。我在企迈踩过 jar 包冲突——arthas 的 sc -d 看是哪个 ClassLoader 加载的，定位到两个版本共存。破坏双亲委派不是错，是工程需要，但要清楚自己在做什么、为什么。」
+用 Tomcat 部署，多个 SaaS 模块（订单、促销、券）依赖不同版本的工具库。WebAppClassLoader 的隔离保证各模块互不影响。另外线上排查"类冲突"用过 `arthas` 的 `sc -d 类名` 看是哪个 ClassLoader 加载的，定位 jar 包冲突。
+
+**⑤ 面试怎么说**
+
+「双亲委派我会先讲清『委派逻辑』——loadClass 先 findLoadedClass，再 parent.loadClass，最后自己 findClass。然后讲『为什么要委派』——安全（防核心类篡改）+ 唯一性（同类同加载器 = 同 Class 对象）。重点讲破坏场景：JDBC 用 TCCL 反向加载 SPI 实现，因为 Bootstrap 加载的 DriverManager 没法向下委派；Tomcat WebAppClassLoader 优先自己加载实现应用隔离；OSGi 网状结构彻底打破树状；热部署靠新 ClassLoader 重加载。我踩过 jar 包冲突——arthas 的 sc -d 看是哪个 ClassLoader 加载的，定位到两个版本共存。破坏双亲委派不是错，是工程需要，但要清楚自己在做什么、为什么。」
 
 ---
 
 ## 1.7 JVM 调优实战（参数 + 决策 + 案例）
 
-### 【为什么/痛点】为什么要调优？
+**① 为什么 / 痛点**
 
-JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的堆大小、对象寿命分布、延迟/吞吐权衡都不同。调优的目标不是"让 GC 消失"，而是"让 GC 在可控范围内、停顿可接受、不 Full GC"。
+为什么要调优？JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的堆大小、对象寿命分布、延迟/吞吐权衡都不同。调优的目标不是"让 GC 消失"，而是"让 GC 在可控范围内、停顿可接受、不 Full GC"。
+
+**② 怎么做 / 原理图解**
+
+### 调优三大目标（权衡）🔴
+```
+低延迟（停顿短）↔ 高吞吐（GC 占 CPU 比例低）↔ 不 Full GC
+三者要权衡，无法全占。
+```
+- **低延迟**：G1/ZGC，调小 MaxGCPauseMillis。
+- **高吞吐**：Parallel，调大新生代减少 GC 频率。
+- **避免 Full GC**：合理堆大小 + 监控。
+
+**③ 代码验证 / 代码示例**
 
 ### 常用参数完整版
 ```bash
@@ -728,16 +941,7 @@ JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的
 -XX:+PrintCommandLineFlags  # 打印 JVM 启动参数
 ```
 
-### 调优三大目标（权衡）🔴
-```
-低延迟（停顿短）↔ 高吞吐（GC 占 CPU 比例低）↔ 不 Full GC
-三者要权衡，无法全占。
-```
-- **低延迟**：G1/ZGC，调小 MaxGCPauseMillis。
-- **高吞吐**：Parallel，调大新生代减少 GC 频率。
-- **避免 Full GC**：合理堆大小 + 监控。
-
-### 【企迈生产实际 JVM 参数】（脱敏）
+### 【生产实际 JVM 参数】（脱敏）
 ```bash
 # 优惠券计算服务（8C16G 容器）
 -Xms8g -Xmx8g                    # 堆固定 8G，避免动态扩缩
@@ -751,6 +955,8 @@ JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的
 -XX:HeapDumpPath=/data/dump/
 -Xlog:gc*:file=/data/log/gc.log:time,uptime,level,tags:filecount=10,filesize=100m
 ```
+
+**④ 真实案例**
 
 ### 📌 线上实战案例 1：G1 频繁 Mixed GC 导致接口抖动
 
@@ -779,14 +985,17 @@ JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的
 
 **教训**：警惕"大对象/大数据集"进老年代，业务要做分页/流式。
 
-### 【面试话术】
-「JVM 调优我会先讲『三大目标权衡』——低延迟、高吞吐、不 Full GC 三者不可兼得，要先定业务优先级。企迈是 Web 服务，延迟优先，所以选 G1 + MaxGCPauseMillis=200。我亲历过两次典型调优：一次是优惠券本地缓存没淘汰，老年代涨到 70% 触发频繁 Mixed GC，每次 800ms，订单 P99 飙到 3s。我做了两件事——业务层换 Caffeine 加 LRU，JVM 层把 IHOP 从 45 调到 35（更早触发并发标记）、MixedGCLiveThresholdPercent 从 85 调到 65（放宽回收条件），Mixed GC 降一个数量级。另一次是报表定时任务用 HashMap 累积 3 亿条，每天凌晨 Full GC 8s，改 MyBatis Cursor 流式处理根治。调优心得是『先查业务再调参数』，90% 的 GC 问题都是业务代码（缓存不淘汰、大数据集、内存泄漏）引起的。」
+**⑤ 面试怎么说**
+
+「JVM 调优我会先讲『三大目标权衡』——低延迟、高吞吐、不 Full GC 三者不可兼得，要先定业务优先级。项目是 Web 服务，延迟优先，所以选 G1 + MaxGCPauseMillis=200。我亲历过两次典型调优：一次是优惠券本地缓存没淘汰，老年代涨到 70% 触发频繁 Mixed GC，每次 800ms，订单 P99 飙到 3s。我做了两件事——业务层换 Caffeine 加 LRU，JVM 层把 IHOP 从 45 调到 35（更早触发并发标记）、MixedGCLiveThresholdPercent 从 85 调到 65（放宽回收条件），Mixed GC 降一个数量级。另一次是报表定时任务用 HashMap 累积 3 亿条，每天凌晨 Full GC 8s，改 MyBatis Cursor 流式处理根治。调优心得是『先查业务再调参数』，90% 的 GC 问题都是业务代码（缓存不淘汰、大数据集、内存泄漏）引起的。」
 
 ---
 
 ## 1.8 线上问题排查 SOP（必背，面试高频）🔴🔴
 
-### 【为什么/痛点】为什么要 SOP？
+> 本节是「工具型/SOP」内容，保持原样不套 5 维度。
+
+**【为什么/痛点】为什么要 SOP？**
 
 线上故障每一秒都是损失。没有 SOP，工程师手忙脚乱试命令浪费时间。SOP 把"高频问题"标准化为"可复现的排查步骤"，把 MTTR（平均恢复时间）从小时级压到分钟级。
 
@@ -848,7 +1057,7 @@ JVM 默认参数是"通用最优"，不是"你的业务最优"。线上场景的
   3. 优化 + 压测验证
 ```
 
-### 【企迈 RT 2s→400ms 的真实排查经历】
+### 【RT 2s→400ms 的真实排查经历】
 - **现象**：优惠券计算接口 P99 = 2s。
 - **链路追踪**：发现 70% 时间在 DB（多次查门店商品 + 多次查券规则）。
 - **优化**：
@@ -882,8 +1091,8 @@ jad 类               # 反编译（确认线上代码版本）
 heapdump /tmp/x.hprof
 ```
 
-### 【面试话术】
-「线上排查我有完整 SOP。CPU 100% 我用『top → top -Hp → printf %x → jstack → grep nid』七步定位，同时用 jstat 区分是用户线程烧还是 GC 烧。OOM 我先看错误类型——heap space 走 MAT 支配树，Metaspace 查类泄漏，Direct buffer 查 Netty 堆外。接口慢我靠 SkyWalking 链路追踪，先定位是全局慢还是单接口，再细查 DB/下游/Redis/GC/锁。Arthas 是我的主力——thread -n 3 看 CPU 高的线程，trace 看方法耗时，watch 看入参返回，jad 反编译确认线上代码版本。企迈优惠券接口 RT 从 2s 降到 400ms 的过程就是这样排查的：链路追踪发现 70% 时间在 DB 的 N+1 查询，改成批量 + Redis+Caffeine 二级缓存命中 85%，再并行化 CPU 密集计算，最后顺带修了一个 Full GC 隐患。」
+**【面试话术】**
+「线上排查我有完整 SOP。CPU 100% 我用『top → top -Hp → printf %x → jstack → grep nid』七步定位，同时用 jstat 区分是用户线程烧还是 GC 烧。OOM 我先看错误类型——heap space 走 MAT 支配树，Metaspace 查类泄漏，Direct buffer 查 Netty 堆外。接口慢我靠 SkyWalking 链路追踪，先定位是全局慢还是单接口，再细查 DB/下游/Redis/GC/锁。Arthas 是我的主力——thread -n 3 看 CPU 高的线程，trace 看方法耗时，watch 看入参返回，jad 反编译确认线上代码版本。优惠券接口 RT 从 2s 降到 400ms 的过程就是这样排查的：链路追踪发现 70% 时间在 DB 的 N+1 查询，改成批量 + Redis+Caffeine 二级缓存命中 85%，再并行化 CPU 密集计算，最后顺带修了一个 Full GC 隐患。」
 
 ---
 
@@ -891,24 +1100,24 @@ heapdump /tmp/x.hprof
 
 ## 2.1 并发三要素 & JMM（Java Memory Model）
 
-### 【为什么/痛点】为什么会有并发问题？
+**① 为什么 / 痛点**
 
-现代 CPU 为了性能做了三件事，每一件都破坏了"顺序一致"的直觉：
+为什么会有并发问题？现代 CPU 为了性能做了三件事，每一件都破坏了"顺序一致"的直觉：
 1. **多核 CPU 各自有 L1/L2 缓存** → 一个核改了变量，另一个核可能看到旧值（可见性问题）。
 2. **编译器/CPU 乱序执行指令** → 写的代码顺序 ≠ 实际执行顺序（有序性问题）。
 3. **操作非原子**（如 i++ 是读-改-写三步）→ 中间被打断（原子性问题）。
 
 JMM 就是定义"什么场景下线程间的读写可见、有序"的规范，让程序员有规可循。
 
-### 【对比表】
+**② 怎么做 / 原理图解**
+
 | 要素 | 问题 | 原因 | 解决 |
 |------|------|------|------|
 | **可见性** | 线程改了变量，另一个看不到 | CPU 缓存 / 工作内存 | volatile / synchronized / Lock |
 | **原子性** | 操作被中断 | 指令非原子 | synchronized / Lock / CAS |
 | **有序性** | 指令重排 | 编译器/CPU 优化 | volatile（内存屏障）/ happens-before |
 
-### 【原理图解 - JMM 模型】
-
+**JMM 模型**：
 ```
 线程 A                      线程 B
 ┌──────────┐               ┌──────────┐
@@ -923,17 +1132,7 @@ JMM 就是定义"什么场景下线程间的读写可见、有序"的规范，�
 - JMM 定义 8 种原子操作：lock/unlock/read/load/use/assign/store/write。
 - 线程不能直接操作主内存，必须通过工作内存。
 
-**JMM 不保证可见性的反例**：
-```java
-// 线程 A 死循环等 stop=true，可能永远看不到 B 改的值（CPU 缓存）
-boolean stop = false;        // 不加 volatile
-// 线程 A
-while (!stop) { /* 卡死 */ }
-// 线程 B
-stop = true;                 // A 可能永远不退出
-```
-
-### happens-before 8 大规则 🔴
+**happens-before 8 大规则** 🔴
 1. 程序顺序规则（同线程内，代码书写顺序，但有依赖才保证）
 2. 监视器锁规则（unlock happens-before 后续 lock）
 3. volatile 变量规则（写 happens-before 后续读）
@@ -945,14 +1144,31 @@ stop = true;                 // A 可能永远不退出
 
 **作用**：判断并发环境下"某次写是否对另一次读可见"。JMM 向程序员提供 happens-before 保证，把底层屏障细节隐藏。
 
-### 【面试话术】
-「并发三要素根源是『CPU 多核缓存 + 乱序执行 + 非原子操作』，JMM 是定义程序员和 JVM 契约的规范——happens-before 8 大规则告诉你哪些场景下写对读可见。我自己写过血泪 bug：企迈有个订单状态机用 boolean 标志位跨线程通信，没加 volatile，测试环境怎么都对，上线后偶发死循环。后来定位是 CPU 缓存可见性问题，加了 volatile 立马好。happens-before 我背得很熟，但实战中用得最多的是『volatile 写 happens-before 后续读』和『unlock happens-before 后续 lock』。」
+**③ 代码验证 / 代码示例**
+
+**JMM 不保证可见性的反例**：
+```java
+// 线程 A 死循环等 stop=true，可能永远看不到 B 改的值（CPU 缓存）
+boolean stop = false;        // 不加 volatile
+// 线程 A
+while (!stop) { /* 卡死 */ }
+// 线程 B
+stop = true;                 // A 可能永远不退出
+```
+
+**④ 真实案例**
+
+订单状态机用 boolean 标志位跨线程通信，没加 volatile，测试环境怎么都对，上线后偶发死循环。后来定位是 CPU 缓存可见性问题，加了 volatile 立马好。
+
+**⑤ 面试怎么说**
+
+「并发三要素根源是『CPU 多核缓存 + 乱序执行 + 非原子操作』，JMM 是定义程序员和 JVM 契约的规范——happens-before 8 大规则告诉你哪些场景下写对读可见。我自己写过血泪 bug：订单状态机用 boolean 标志位跨线程通信，没加 volatile，测试环境怎么都对，上线后偶发死循环。后来定位是 CPU 缓存可见性问题，加了 volatile 立马好。happens-before 我背得很熟，但实战中用得最多的是『volatile 写 happens-before 后续读』和『unlock happens-before 后续 lock』。」
 
 ---
 
 ## 2.2 volatile 深度（底层 + 应用）
 
-### 【为什么/痛点】volatile 解决什么问题？
+**① 为什么 / 痛点**
 
 `volatile` 比 `synchronized` 轻量，专门解决**可见性 + 有序性**（不解决原子性）。适用场景：
 - 状态标志位（如 stop、ready）跨线程通信。
@@ -961,17 +1177,19 @@ stop = true;                 // A 可能永远不退出
 
 如果用 synchronized 做这些事，太重（涉及锁升级、OS 调度）；用 volatile 刚好——一行汇编指令搞定。
 
-### 两层语义
+**两层语义**：
 1. **可见性**：写 volatile 变量 → 强制刷主内存 + 让其他线程工作内存失效。
 2. **禁止指令重排**：插入**内存屏障**。
 
-### 底层实现（汇编级）🔴
+**② 怎么做 / 原理图解**
+
+**底层实现（汇编级）**🔴
 - Hotspot 写 volatile 变量 → 生成 `lock addl $0x0, (%rsp)` 指令（lock 前缀）。
 - **lock 前缀指令的作用**：
   1. 锁定缓存行 → 触发 **MESI 缓存一致性协议** → 其他 CPU 该缓存行失效。
   2. 作为**全屏障**（StoreLoad），禁止前后指令重排。
 
-### 内存屏障 4 种 🟡
+**内存屏障 4 种** 🟡
 | 屏障 | 作用 |
 |------|------|
 | LoadLoad | Load1; LoadLoad; Load2 → Load1 必须先于 Load2 |
@@ -981,7 +1199,7 @@ stop = true;                 // A 可能永远不退出
 
 volatile 写前插 StoreStore，写后插 StoreLoad；读后插 LoadLoad + LoadStore。
 
-### volatile 不保证原子性 🔴
+**volatile 不保证原子性** 🔴
 `i++` 是读-改-写三步：
 ```
 1. 读 i 到工作内存
@@ -990,8 +1208,9 @@ volatile 写前插 StoreStore，写后插 StoreLoad；读后插 LoadLoad + LoadS
 ```
 volatile 保证每步可见，但**三步之间可被打断** → 丢更新。要 `AtomicInteger`（CAS）或锁。
 
-### 🔴 经典应用：DCL 单例为什么必须 volatile
+**③ 代码验证 / 代码示例**
 
+**经典应用：DCL 单例为什么必须 volatile**
 ```java
 public class Singleton {
     private static volatile Singleton instance;  // volatile 必加！
@@ -1022,7 +1241,7 @@ volatile 禁止 ②③ 重排，保证安全。
 - 第一次 check：避免每次都加锁（性能）。
 - 第二次 check：防止并发下重复创建。
 
-### 【对比/边界】volatile vs synchronized vs Atomic
+**对比/边界**：volatile vs synchronized vs Atomic
 | | volatile | synchronized | AtomicXxx |
 |---|----------|--------------|-----------|
 | 可见性 | ✅ | ✅ | ✅ |
@@ -1031,24 +1250,30 @@ volatile 禁止 ②③ 重排，保证安全。
 | 阻塞 | 否 | 是 | 否 |
 | 适用 | 状态标志、DCL | 复合操作 | 单变量计数 |
 
-### 【面试话术】
-「volatile 我会讲『两层语义 + 底层 lock 前缀指令 + 不保证原子性 + DCL 必加』。底层是 Hotspot 写 volatile 生成 `lock addl $0x0,(%rsp)`，lock 前缀做两件事——锁定缓存行触发 MESI 让其他 CPU 失效 + 作为 StoreLoad 全屏障禁止重排。DCL 单例必加 volatile 是因为 new 对象三步（分配→初始化→赋引用）可能重排成『分配→赋引用→初始化』，其他线程拿到半初始化对象 NPE。我在企迈用 volatile 最多的场景是状态机标志位（订单关闭、券失效）和配置热更新开关，比 synchronized 轻得多。但要记住 volatile 不保证原子性，i++ 还是要用 AtomicInteger。」
+**④ 真实案例**
+
+用 volatile 最多的场景是状态机标志位（订单关闭、券失效）和配置热更新开关，比 synchronized 轻得多。但要记住 volatile 不保证原子性，i++ 还是要用 AtomicInteger。
+
+**⑤ 面试怎么说**
+
+「volatile 我会讲『两层语义 + 底层 lock 前缀指令 + 不保证原子性 + DCL 必加』。底层是 Hotspot 写 volatile 生成 `lock addl $0x0,(%rsp)`，lock 前缀做两件事——锁定缓存行触发 MESI 让其他 CPU 失效 + 作为 StoreLoad 全屏障禁止重排。DCL 单例必加 volatile 是因为 new 对象三步（分配→初始化→赋引用）可能重排成『分配→赋引用→初始化』，其他线程拿到半初始化对象 NPE。我用 volatile 最多的场景是状态机标志位（订单关闭、券失效）和配置热更新开关，比 synchronized 轻得多。但要记住 volatile 不保证原子性，i++ 还是要用 AtomicInteger。」
 
 ---
 
 ## 2.3 synchronized 深度（锁升级源码级）
 
-### 【为什么/痛点】为什么要锁升级？
+**① 为什么 / 痛点**
 
-早期 synchronized 直接上重量级锁（OS 互斥量），无竞争时也走内核态，性能差。JDK6 引入锁升级：
+为什么要锁升级？早期 synchronized 直接上重量级锁（OS 互斥量），无竞争时也走内核态，性能差。JDK6 引入锁升级：
 - **无竞争**：偏向锁（记 ThreadID，零开销）。
 - **轻度竞争**：轻量级锁（CAS 自旋，无内核态）。
 - **激烈竞争**：重量级锁（OS 调度阻塞）。
 
 核心思想：**根据竞争激烈程度动态选择锁实现，让"大部分无竞争场景"几乎零开销**。
 
-### 对象头 Mark Word 与锁状态（64 位）🔴🔴
+**② 怎么做 / 原理图解**
 
+**对象头 Mark Word 与锁状态（64 位）**🔴🔴
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ 锁状态    │ Mark Word 内容（64 bit）              │ 标志位     │
@@ -1063,8 +1288,7 @@ volatile 禁止 ②③ 重排，保证安全。
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 锁升级完整流程（JDK6+ 优化）🔴
-
+**锁升级完整流程（JDK6+ 优化）**🔴
 ```
 ┌─────────┐  多线程竞争   ┌──────────┐  自旋失败    ┌──────────┐
 │  无锁    │ ──────────→ │ 偏向锁    │ ──────────→ │ 轻量级锁  │
@@ -1096,7 +1320,9 @@ volatile 禁止 ②③ 重排，保证安全。
 - 未获锁线程进入 **EntryList**，调用 `pthread_mutex_lock` 阻塞（OS 调度，成本高：用户态↔内核态切换）。
 - 适合**竞争激烈、持有时间长**。
 
-### ObjectMonitor 核心结构 🟡
+**③ 代码验证 / 代码示例**
+
+**ObjectMonitor 核心结构** 🟡
 ```cpp
 class ObjectMonitor {
     ObjectWaiter * _owner;       // 持有者线程
@@ -1109,7 +1335,7 @@ class ObjectMonitor {
 - `wait()` → 释放锁，线程进 WaitSet，等 notify 唤醒回 EntryList。
 - `notify()` → 从 WaitSet 移一个到 EntryList。
 
-### synchronized vs ReentrantLock 🔴
+**synchronized vs ReentrantLock** 🔴
 | | synchronized | ReentrantLock |
 |---|---|---|
 | 实现 | JVM 关键字（monitorenter/exit） | AQS（JDK API） |
@@ -1120,48 +1346,63 @@ class ObjectMonitor {
 | 条件变量 | 1 个（wait/notify） | 多个 Condition |
 | 锁分离 | 不可 | ReentrantReadWriteLock / StampedLock |
 
-### 【真实案例 - 企迈茶饮】
+**④ 真实案例**
+
 优惠券领取的库存扣减用 synchronized（库存少、竞争短）：`synchronized(couponId.intern())` 桶锁。秒杀场景换成 Redis + Lua（分布式锁 + 原子扣减）。
 
-### 【面试话术】
-「synchronized 我会从『为什么有锁升级』讲起——早期直接重量级锁太重，JDK6 引入偏向锁→轻量级锁→重量级锁的渐进升级，核心是『按竞争激烈度动态选锁实现』。Mark Word 64 位里前缀记录锁状态，偏向锁存 ThreadID（零开销重入），轻量级锁 CAS 自旋（无内核态），重量级锁走 ObjectMonitor 的 EntryList + pthread_mutex_lock（内核态阻塞）。只升不降（GC 除外）。JDK15 把偏向锁废弃了，因为现代应用竞争多，revocation 成本超过收益。synchronized vs ReentrantLock 我看场景：简单同步用 synchronized（自动释放、JVM 优化好），需要超时/中断/公平/多 Condition 用 ReentrantLock。企迈券库存扣减我用 synchronized(couponId.intern()) 做桶锁，秒杀场景换 Redis+Lua 分布式锁。」
+**⑤ 面试怎么说**
+
+「synchronized 我会从『为什么有锁升级』讲起——早期直接重量级锁太重，JDK6 引入偏向锁→轻量级锁→重量级锁的渐进升级，核心是『按竞争激烈度动态选锁实现』。Mark Word 64 位里前缀记录锁状态，偏向锁存 ThreadID（零开销重入），轻量级锁 CAS 自旋（无内核态），重量级锁走 ObjectMonitor 的 EntryList + pthread_mutex_lock（内核态阻塞）。只升不降（GC 除外）。JDK15 把偏向锁废弃了，因为现代应用竞争多，revocation 成本超过收益。synchronized vs ReentrantLock 我看场景：简单同步用 synchronized（自动释放、JVM 优化好），需要超时/中断/公平/多 Condition 用 ReentrantLock。券库存扣减我用 synchronized(couponId.intern()) 做桶锁，秒杀场景换 Redis+Lua 分布式锁。」
 
 ---
 
 ## 2.4 CAS 与 ABA（底层 + 自旋）🔴
 
-### 【为什么/痛点】CAS 解决什么问题？
+**① 为什么 / 痛点**
 
-` synchronized` 性能差（OS 调度阻塞），无锁编程（lock-free）用 CAS 实现"无阻塞的原子更新"。CAS 是 **Compare And Swap**——比较并交换，硬件级原子指令，无锁数据结构（AtomicXxx、ConcurrentHashMap、AQS）的基石。
+CAS 解决什么问题？`synchronized` 性能差（OS 调度阻塞），无锁编程（lock-free）用 CAS 实现"无阻塞的原子更新"。CAS 是 **Compare And Swap**——比较并交换，硬件级原子指令，无锁数据结构（AtomicXxx、ConcurrentHashMap、AQS）的基石。
 
-### CAS（Compare And Swap）
-```java
-// AtomicInteger.compareAndSet 源码最终调用 Unsafe
-public final native boolean compareAndSwapInt(Object o, long offset, int expected, int x);
-```
+**② 怎么做 / 原理图解**
+
+**CAS（Compare And Swap）**
 - 硬件支持：x86 的 `cmpxchg` 指令（带 lock 前缀保证总线锁/缓存锁）。
 - 原子语义：比较内存值 V 与期望值 E，相等则更新为 N，返回 true；否则返回 false。
 
-### CAS 三大缺点 🔴
+**CAS 三大缺点** 🔴
 1. **自旋开销**：竞争激烈时空转烧 CPU。
 2. **只保证一个变量**：多变量要 AtomicReference 包装对象。
 3. **ABA 问题**：
    - 值 A→B→A，CAS 认为没变。
    - 解决：**版本号** AtomicStampedReference（值 + stamp 一起比较）。
 
-### ABA 的真实危害场景 🟡
+**ABA 的真实危害场景** 🟡
 - **栈/链表操作**：线程 1 准备 CAS 把 head 从 A 换成 C，期间线程 2 把 A 弹出又 push 回来（A 的 next 变了），线程 1 CAS 成功但链表结构已破坏。
 - **银行转账**：余额 100→200→100，CAS 误判没变（业务上可能有问题）。
 
-### 自适应自旋（Adaptive Spinning）
+**自适应自旋（Adaptive Spinning）**
 - JDK6 引入。自旋次数动态调整：上次 CAS 成功 → 认为这次也能成功 → 多旋；反之少旋。
 - 避免固定自旋在竞争激烈时空转。
 
-### 【真实案例 - 企迈茶饮】
+**③ 代码验证 / 代码示例**
+
+```java
+// AtomicInteger.compareAndSet 源码最终调用 Unsafe
+public final native boolean compareAndSwapInt(Object o, long offset, int expected, int x);
+
+// ABA 解决：带版本号
+AtomicStampedReference<Integer> ref = new AtomicStampedReference<>(100, 0);
+int[] stamp = new int[1];
+Integer v = ref.get(stamp);          // 取值 + 当前 stamp
+ref.compareAndSet(v, 200, stamp[0], stamp[0] + 1);  // 同时比对值和 stamp
+```
+
+**④ 真实案例**
+
 优惠券剩余库存用 AtomicInteger CAS 扣减（无锁高性能），秒杀级流量下比 synchronized 快。但坑：高并发下 CAS 自旋失败多，CPU 飙高。**解决**：阈值降级——超过一定失败率切换到分段锁（库存拆成 N 个槽，分别 CAS）。
 
-### 【面试话术】
-「CAS 是无锁编程的基石，硬件级 cmpxchg 指令保证原子。AtomicInteger、AQS、ConcurrentHashMap 全靠它。三大缺点我必须讲——自旋烧 CPU、只能单变量、ABA。ABA 最经典的是链表操作场景：head A 被弹出又 push 回来，CAS 误判没变导致结构破坏，用 AtomicStampedReference 加版本号解决。企迈券库存我用 AtomicInteger CAS 扣减，比 synchronized 快很多，但秒杀流量下自旋失败率飙升 CPU 烧，我做了个分段锁降级——把库存拆 N 个槽各自 CAS，分散竞争点。自适应自旋是 JDK6 的优化，根据历史成功率动态调自旋次数。CAS 不是银弹，竞争激烈时反而不如锁。」
+**⑤ 面试怎么说**
+
+「CAS 是无锁编程的基石，硬件级 cmpxchg 指令保证原子。AtomicInteger、AQS、ConcurrentHashMap 全靠它。三大缺点我必须讲——自旋烧 CPU、只能单变量、ABA。ABA 最经典的是链表操作场景：head A 被弹出又 push 回来，CAS 误判没变导致结构破坏，用 AtomicStampedReference 加版本号解决。券库存我用 AtomicInteger CAS 扣减，比 synchronized 快很多，但秒杀流量下自旋失败率飙升 CPU 烧，我做了个分段锁降级——把库存拆 N 个槽各自 CAS，分散竞争点。自适应自旋是 JDK6 的优化，根据历史成功率动态调自旋次数。CAS 不是银弹，竞争激烈时反而不如锁。」
 
 ---
 
@@ -1169,12 +1410,13 @@ public final native boolean compareAndSwapInt(Object o, long offset, int expecte
 
 AQS 是 JUC 的基石：ReentrantLock、Semaphore、CountDownLatch、ReentrantReadWriteLock 都基于它。
 
-### 【为什么/痛点】为什么要有 AQS？
+**① 为什么 / 痛点**
 
-如果没有 AQS，每个同步工具（锁、信号量、闭锁）都要自己实现"线程排队 + 阻塞唤醒 + 状态管理"，重复造轮子且容易出 bug。AQS 用**模板方法模式**抽出公共逻辑（CLH 队列 + state + park/unpark），子类只需实现 `tryAcquire/tryRelease`。这是 Doug Lea 的神作，一行代码被全行业复用十几年。
+为什么要有 AQS？如果没有 AQS，每个同步工具（锁、信号量、闭锁）都要自己实现"线程排队 + 阻塞唤醒 + 状态管理"，重复造轮子且容易出 bug。AQS 用**模板方法模式**抽出公共逻辑（CLH 队列 + state + park/unpark），子类只需实现 `tryAcquire/tryRelease`。这是 Doug Lea 的神作，一行代码被全行业复用十几年。
 
-### 核心组成
+**② 怎么做 / 原理图解**
 
+**核心组成**：
 ```
               ┌─ volatile int state（同步状态）
 AQS ──────────┤
@@ -1187,7 +1429,7 @@ AQS ──────────┤
 - CountDownLatch：未完成的计数。
 - ReadWriteLock：高 16 位读 / 低 16 位写。
 
-### CLH 队列结构 🟡
+**CLH 队列结构** 🟡
 ```
        head                                  tail
         ↓                                      ↓
@@ -1202,8 +1444,9 @@ AQS ──────────┤
 - CLH 入队只需 CAS 设 tail，出队只需 head 后移，竞争点少。
 - 每个节点靠前驱的 waitStatus 决定是否 park，避免全局锁。
 
-### ReentrantLock 加锁流程（非公平）🔴
+**③ 代码验证 / 代码示例**
 
+**ReentrantLock 加锁流程（非公平）**🔴
 ```java
 // 1. lock()
 final void lock() {
@@ -1262,7 +1505,7 @@ if (c == 0) {
 - 非公平：上来直接 CAS 抢，吞吐高（减少线程切换）。
 - 公平：按队列顺序，饿不死，但吞吐低。
 
-### 基于 AQS 的核心组件 🔴
+**基于 AQS 的核心组件** 🔴
 | 组件 | 模式 | state 含义 |
 |------|------|-----------|
 | ReentrantLock | 独占 | 重入次数 |
@@ -1272,7 +1515,7 @@ if (c == 0) {
 | CyclicBarrier | 基于 ReentrantLock+Condition | — |
 | StampedLock（JDK8） | 乐观读+写 | 不基于 AQS |
 
-### CountDownLatch vs CyclicBarrier 🔴
+**CountDownLatch vs CyclicBarrier** 🔴
 | | CountDownLatch | CyclicBarrier |
 |---|---|---|
 | 实现 | AQS 共享 | ReentrantLock + Condition |
@@ -1280,24 +1523,27 @@ if (c == 0) {
 | 复用 | 一次性 | reset 可复用 |
 | 场景 | 主线程等 N 个任务 | N 个线程互相等齐 |
 
-### 【真实案例 - 企迈茶饮】
+**④ 真实案例**
+
 优惠券计算引擎的多策略并行：主线程用 CountDownLatch 等待 6 个策略（满减、折扣、买赠、满件减、组合、新人券）都算完，再合并结果。如果某个策略超时，主线程不会无限等——`latch.await(500, MS)` 带超时。
 
-### 【面试话术】
-「AQS 是 JUC 基石，我会讲『为什么有 AQS——模板方法抽出公共同步逻辑避免重复造轮子』。核心是 volatile int state（语义随实现变）+ CLH 变体队列（FIFO 双向链表）。ReentrantLock 加锁流程我背得滚瓜烂熟：lock 先 CAS 抢 state，抢不到走 acquire → tryAcquire（子类实现）→ acquireQueued 入队 + shouldParkAfterFailedAcquire + LockSupport.park。公平 vs 非公平的区别就是 hasQueuedPredecessors 这一句——非公平直接抢（吞吐高），公平看队列（不饿死）。企迈券计算引擎我用 CountDownLatch 让主线程等 6 个策略并行算完再合并，带超时防卡死。AQS 我读过源码，建议面试前看一遍 acquire/release 的完整流程，能讲到 LockSupport.park 的底层数据结构（Parker，用 pthread_mutex + pthread_cond）就是加分项。」
+**⑤ 面试怎么说**
+
+「AQS 是 JUC 基石，我会讲『为什么有 AQS——模板方法抽出公共同步逻辑避免重复造轮子』。核心是 volatile int state（语义随实现变）+ CLH 变体队列（FIFO 双向链表）。ReentrantLock 加锁流程我背得滚瓜烂熟：lock 先 CAS 抢 state，抢不到走 acquire → tryAcquire（子类实现）→ acquireQueued 入队 + shouldParkAfterFailedAcquire + LockSupport.park。公平 vs 非公平的区别就是 hasQueuedPredecessors 这一句——非公平直接抢（吞吐高），公平看队列（不饿死）。券计算引擎我用 CountDownLatch 让主线程等 6 个策略并行算完再合并，带超时防卡死。AQS 我读过源码，建议面试前看一遍 acquire/release 的完整流程，能讲到 LockSupport.park 的底层数据结构（Parker，用 pthread_mutex + pthread_cond）就是加分项。」
 
 ---
 
 ## 2.6 线程池（ThreadPoolExecutor）🔴🔴 必精通（源码 + 实战）
 
-### 【为什么/痛点】为什么要有线程池？
+**① 为什么 / 痛点**
 
-两个痛点：
+为什么要有线程池？两个痛点：
 1. **线程创建/销毁成本高**（OS 系统调用 + 栈内存分配）。池化复用，省开销。
 2. **无限制 new 线程会 OOM**（`unable to create new native thread`）或拖垮下游。线程池做"限流 + 隔离 + 可监控"。
 
-### 7 参数 + 状态机
+**② 怎么做 / 原理图解**
 
+**7 参数 + 状态机**
 ```java
 new ThreadPoolExecutor(
     int corePoolSize,                  // 核心线程数
@@ -1318,8 +1564,7 @@ TIDYING     (2)   所有任务终止，worker 数 0，调 terminated()
 TERMINATED  (3)   terminated() 执行完
 ```
 
-### 执行流程（必背）🔴
-
+**执行流程（必背）**🔴
 ```
 提交任务 execute(task)
       │
@@ -1342,13 +1587,15 @@ TERMINATED  (3)   terminated() 执行完
    执行拒绝策略
 ```
 
-### 4 种拒绝策略 🔴
+**4 种拒绝策略** 🔴
 1. **AbortPolicy**（默认）：抛 RejectedExecutionException。
 2. **CallerRunsPolicy**：让提交任务的线程自己执行（**背压**降速，生产推荐）。
 3. **DiscardPolicy**：默默丢弃（慎用，丢数据无感知）。
 4. **DiscardOldestPolicy**：丢队列最老的，重试（适合时效性任务）。
 
-### Worker 源码核心 🟡
+**③ 代码验证 / 代码示例**
+
+**Worker 源码核心** 🟡
 ```java
 final void runWorker(Worker w) {
     Runnable task = w.firstTask;
@@ -1366,7 +1613,7 @@ final void runWorker(Worker w) {
 // getTask() 从队列 take/poll，超时返回 null → 线程退出（销毁非核心线程）
 ```
 
-### 为什么禁用 Executors？🔴
+**为什么禁用 Executors？**🔴
 | Executors 方法 | 问题 |
 |---------------|------|
 | newFixedThreadPool | LinkedBlockingQueue **无界** → 队列堆积 OOM |
@@ -1376,14 +1623,14 @@ final void runWorker(Worker w) {
 
 阿里规约：用 `new ThreadPoolExecutor(...)` 显式有界队列 + 明确参数。
 
-### 线程数怎么设？🔴
+**线程数怎么设？**🔴
 - **CPU 密集型**：`N + 1`（N = CPU 核数）。多 1 防偶发停顿。
 - **IO 密集型**：`2N` 或 `N × (1 + 等待时间/计算时间)`。
   - 本质：让 CPU 不闲着（IO 时切换其他线程）。
 - **混合型**：拆成两个线程池，或根据 Profiling 算。
 - **最终靠压测**：监控队列堆积、拒绝次数、活跃线程。
 
-### 【企迈线程池配置规范】
+**【线程池配置规范】**
 ```java
 // 通用业务线程池（IO 密集，8C 机器）
 ThreadPoolExecutor bizPool = new ThreadPoolExecutor(
@@ -1397,6 +1644,8 @@ ThreadPoolExecutor bizPool = new ThreadPoolExecutor(
 );
 // 监控：暴露 activeCount、queueSize、rejected 次数到 Prometheus
 ```
+
+**④ 真实案例**
 
 ### 📌 线上实战案例 3：线程池把 DB 连接打满
 
@@ -1419,20 +1668,23 @@ ThreadPoolExecutor bizPool = new ThreadPoolExecutor(
 **排查**：用 `DiscardPolicy`（默默丢）+ 队列无界（其实有界 1000）但突发流量超 1000 → 丢弃无感知。
 **解决**：改 `CallerRunsPolicy`（背压）+ 监控拒绝次数 + 告警。
 
-### 【面试话术】
-「线程池我讲四块——7 参数、执行流程（核心→队列→非核心→拒绝）、4 种拒绝策略、为什么禁 Executors。执行流程必背：线程数 < core 创建核心，满了入队，队列满了创建非核心到 max，再满走拒绝策略。禁用 Executors 是因为 newFixedThreadPool 用无界队列 OOM，newCachedThreadPool 最大线程 Integer.MAX_VALUE 线程 OOM，阿里规约强制 new ThreadPoolExecutor 显式参数。线程数 IO 密集 2N、CPU 密集 N+1，但最终靠压测。企迈踩过两个坑——一是 @Async 用 Executors 开 200 线程把 DB 连接打满，二是用 DiscardPolicy 任务丢失无感知。生产标配是 CallerRunsPolicy（背压）+ 有界队列 + Prometheus 监控 queueSize/rejected + 线程命名（排查必备）。」
+**⑤ 面试怎么说**
+
+「线程池我讲四块——7 参数、执行流程（核心→队列→非核心→拒绝）、4 种拒绝策略、为什么禁 Executors。执行流程必背：线程数 < core 创建核心，满了入队，队列满了创建非核心到 max，再满走拒绝策略。禁用 Executors 是因为 newFixedThreadPool 用无界队列 OOM，newCachedThreadPool 最大线程 Integer.MAX_VALUE 线程 OOM，阿里规约强制 new ThreadPoolExecutor 显式参数。线程数 IO 密集 2N、CPU 密集 N+1，但最终靠压测。踩过两个坑——一是 @Async 用 Executors 开 200 线程把 DB 连接打满，二是用 DiscardPolicy 任务丢失无感知。生产标配是 CallerRunsPolicy（背压）+ 有界队列 + Prometheus 监控 queueSize/rejected + 线程命名（排查必备）。」
 
 ---
 
 ## 2.7 ThreadLocal 深度（原理 + 泄漏 + 最佳实践）🔴
 
-### 【为什么/痛点】ThreadLocal 解决什么问题？
+**① 为什么 / 痛点**
 
-两个经典场景：
+ThreadLocal 解决什么问题？两个经典场景：
 1. **线程内变量隔离**：每个线程有自己的副本（如数据库连接、用户上下文、SimpleDateFormat），避免共享竞争。
 2. **避免参数层层透传**：把 traceId、用户信息放 ThreadLocal，全链路任意位置可取，不用每个方法签名都加参数。
 
-### 数据结构
+**② 怎么做 / 原理图解**
+
+**数据结构**
 ```
 Thread
   └── ThreadLocal.ThreadLocalMap threadLocals
@@ -1444,12 +1696,11 @@ Thread
               }
 ```
 
-### 为什么 key 用弱引用？🔴
+**为什么 key 用弱引用？**🔴
 - 如果 key 强引用 ThreadLocal，ThreadLocal 对象永远回收不了（只要线程活着）。
 - 弱引用让 ThreadLocal 在无强引用时被 GC（key 变 null），但 **value 还在**（强引用）→ 泄漏隐患。
 
-### 内存泄漏机制 🔴
-
+**内存泄漏机制** 🔴
 ```
 Thread (线程池，长期存活)
   └── ThreadLocalMap
@@ -1459,11 +1710,18 @@ Thread (线程池，长期存活)
 - 线程池场景，线程长期存活。
 - ThreadLocal 用完没 remove → key 被 GC 变 null，value 强引用驻留 → 泄漏。
 
-### ThreadLocal 的自清理机制（不够可靠）🟡
+**ThreadLocal 的自清理机制（不够可靠）**🟡
 - get/set/remove 时会清理 key==null 的 Entry（expungeStaleEntry）。
 - **但**：如果不再次访问该 ThreadLocal，value 永远清不掉。
 
-### 最佳实践
+**InheritableThreadLocal 的局限 + TTL** 🔴
+- InheritableThreadLocal：子线程能继承父线程值，但**线程池失效**（线程复用，父子关系只在线程创建时建立一次）。
+- 解决：阿里 **TransmittableThreadLocal（TTL）**，用 Agent 字节码增强 / 装饰 Runnable，在任务提交时快照、执行时回放。
+- 场景：链路追踪 traceId、用户上下文、日志 MDC 跨线程池传递。
+
+**③ 代码验证 / 代码示例**
+
+**最佳实践**
 ```java
 ThreadLocal<User> ctx = new ThreadLocal<>();
 try {
@@ -1474,22 +1732,25 @@ try {
 }
 ```
 
-### InheritableThreadLocal 的局限 + TTL 🔴
-- InheritableThreadLocal：子线程能继承父线程值，但**线程池失效**（线程复用，父子关系只在线程创建时建立一次）。
-- 解决：阿里 **TransmittableThreadLocal（TTL）**，用 Agent 字节码增强 / 装饰 Runnable，在任务提交时快照、执行时回放。
-- 场景：链路追踪 traceId、用户上下文、日志 MDC 跨线程池传递。
+**④ 真实案例**
 
-### 【真实案例 - 企迈茶饮】
 多租户场景用 ThreadLocal 存当前请求的 `tenantId`、`shopId`、`userId`，全链路任意方法可取，不用透传。配合 TTL 在线程池任务里也能拿到。坑：早期用 InheritableThreadLocal，线程池场景下租户 ID 串号（A 门店用户看到 B 门店数据），换 TTL 解决。
 
-### 【面试话术】
-「ThreadLocal 我讲『为什么有 + 数据结构 + 为什么 key 弱引用 + 泄漏机制 + TTL』。核心是每个 Thread 有自己的 ThreadLocalMap，Entry 的 key 是弱引用（防止 ThreadLocal 对象泄漏），value 是强引用。泄漏场景：线程池线程长期存活 + ThreadLocal 用完没 remove → key 被 GC 变 null 但 value 还在 → 内存泄漏。自清理机制（get/set/remove 时清 key==null 的 Entry）不可靠，所以必须 try-finally remove。InheritableThreadLocal 线程池失效（线程复用父子关系只建一次），企迈多租户用 TTL 跨线程池传 tenantId/shopId/userId，早期用 InheritableThreadLocal 还串过号（A 门店看到 B 门店数据），换 TTL 根治。」
+**⑤ 面试怎么说**
+
+「ThreadLocal 我讲『为什么有 + 数据结构 + 为什么 key 弱引用 + 泄漏机制 + TTL』。核心是每个 Thread 有自己的 ThreadLocalMap，Entry 的 key 是弱引用（防止 ThreadLocal 对象泄漏），value 是强引用。泄漏场景：线程池线程长期存活 + ThreadLocal 用完没 remove → key 被 GC 变 null 但 value 还在 → 内存泄漏。自清理机制（get/set/remove 时清 key==null 的 Entry）不可靠，所以必须 try-finally remove。InheritableThreadLocal 线程池失效（线程复用父子关系只建一次），多租户用 TTL 跨线程池传 tenantId/shopId/userId，早期用 InheritableThreadLocal 还串过号（A 门店看到 B 门店数据），换 TTL 根治。」
 
 ---
 
 ## 2.8 并发容器深度
 
 ### ConcurrentHashMap JDK7 vs JDK8 🔴🔴
+
+**① 为什么 / 痛点**
+
+为什么要演进？JDK7 的分段锁并发度上限只有 16，且每段自带锁对象内存开销大；JDK6 之后 synchronized 优化很好（偏向/轻量级锁），不需要再用独立的 ReentrantLock 分段。JDK8 改成 CAS + synchronized 锁桶头节点，把并发度从 16 段提升到桶级别，内存更省。
+
+**② 怎么做 / 原理图解**
 
 **JDK7：Segment 分段锁**
 ```
@@ -1523,13 +1784,70 @@ put 流程：
 - `baseCount`（无竞争时 CAS）+ `CounterCell[]`（有竞争时分段累加）。
 - size 时求和，**弱一致性**（可能不准）。
 
+**③ 代码验证 / 代码示例**
+
+详见 3.2 节的 ConcurrentHashMap put 流程源码解析。
+
+**④ 真实案例**
+
+- 门店商品本地缓存（Caffeine 内部就是它的扩展思路），高峰读多写少。
+- 优惠券规则配置用 CopyOnWriteArrayList（运维改配置时写，业务读），避免读写锁开销。
+- 异步任务队列用 LinkedBlockingQueue（有界 500），曾因忘设容量默认 Integer.MAX_VALUE 堆积 OOM，后改为显式 500。
+
+**⑤ 面试怎么说**
+
+「ConcurrentHashMap 我重点讲 JDK7 到 JDK8 的演进——JDK7 是 Segment 分段锁（ReentrantLock 锁一段，并发度 16），JDK8 改成 Node[] + CAS + synchronized 锁头节点，并发度提到桶级别。为什么放弃分段锁？一是并发度更高（桶级 vs 16 段），二是内存省（分段锁每段自带锁对象），三是 JDK6 后 synchronized 优化好（偏向/轻量级），空桶 CAS 无锁，冲突才 synchronized。size 用 baseCount + CounterCell[] 分段计数（借鉴 LongAdder），弱一致。CopyOnWriteArrayList 写时复制适合读多写少（配置、监听器），缺点写放大。门店商品缓存用 ConcurrentHashMap（高峰读多写少），券规则配置用 CopyOnWriteArrayList，异步队列用 LinkedBlockingQueue 但一定显式设容量，我踩过默认 Integer.MAX_VALUE 堆积 OOM 的坑。」
+
+---
+
 ### CopyOnWriteArrayList 🟡
+
+**① 为什么 / 痛点**
+
+读多写少场景下，用普通 List + 读写锁仍有锁竞争开销。CopyOnWriteArrayList 让读完全无锁（读快照），代价是写时复制整个数组。适合监听器列表、配置等"读极多、写极少"的场景。
+
+**② 怎么做 / 原理图解**
+
 - 写时复制：`ReentrantLock` + 复制新数组 → 旧引用指向新数组。
 - 读无锁，读的是旧数组快照（**最终一致**）。
 - 适合**读多写少**（监听器列表、配置）。
 - 缺点：写放大（每次复制整个数组）、弱一致性。
 
+**③ 代码验证 / 代码示例**
+
+```java
+// 写：加锁 + 复制 + 替换引用
+public boolean add(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        Object[] elements = getArray();
+        int len = elements.length;
+        Object[] newElements = Arrays.copyOf(elements, len + 1); // 复制
+        newElements[len] = e;
+        setArray(newElements);                                   // 替换引用
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+// 读：无锁，直接 get 数组对应下标
+```
+
+**④ 真实案例**
+
+优惠券规则配置（运维后台改、业务侧读）用 CopyOnWriteArrayList，避免读写锁开销，配置改动频率极低但读极其频繁。
+
+**⑤ 面试怎么说**
+
+「CopyOnWriteArrayList 写时复制适合读多写少（配置、监听器），缺点写放大。券规则配置用 CopyOnWriteArrayList，运维改写、业务读，读完全无锁性能好。」
+
+---
+
 ### 阻塞队列 BlockingQueue（线程池用）
+
+> 本节是「工具型清单」，保持原样。
+
 | 实现 | 特点 |
 |------|------|
 | ArrayBlockingQueue | 有界数组，一把锁（出入互斥） |
@@ -1539,21 +1857,13 @@ put 流程：
 | DelayQueue | 延时（ScheduledThreadPool 用） |
 | LinkedTransferQueue | transfer() 直接交付，高吞吐 |
 
-### 【真实案例 - 企迈茶饮】
-- ConcurrentHashMap：门店商品本地缓存（Caffeine 内部就是它的扩展思路），高峰读多写少。
-- 优惠券规则配置用 CopyOnWriteArrayList（运维改配置时写，业务读），避免读写锁开销。
-- 异步任务队列用 LinkedBlockingQueue（有界 500），曾因忘设容量默认 Integer.MAX_VALUE 堆积 OOM，后改为显式 500。
-
-### 【面试话术】
-「ConcurrentHashMap 我重点讲 JDK7 到 JDK8 的演进——JDK7 是 Segment 分段锁（ReentrantLock 锁一段，并发度 16），JDK8 改成 Node[] + CAS + synchronized 锁头节点，并发度提到桶级别。为什么放弃分段锁？一是并发度更高（桶级 vs 16 段），二是内存省（分段锁每段自带锁对象），三是 JDK6 后 synchronized 优化好（偏向/轻量级），空桶 CAS 无锁，冲突才 synchronized。size 用 baseCount + CounterCell[] 分段计数（借鉴 LongAdder），弱一致。CopyOnWriteArrayList 写时复制适合读多写少（配置、监听器），缺点写放大。企迈门店商品缓存用 ConcurrentHashMap（高峰读多写少），券规则配置用 CopyOnWriteArrayList，异步队列用 LinkedBlockingQueue 但一定显式设容量，我踩过默认 Integer.MAX_VALUE 堆积 OOM 的坑。」
-
 ---
 
 # 第三篇 集合框架（源码级）
 
 ## 3.1 HashMap JDK8 源码深度 🔴🔴
 
-### 【为什么/痛点】HashMap 解决什么问题？为什么这么设计？
+**① 为什么 / 痛点**
 
 HashMap 是"哈希表 + 链表/红黑树"的混合结构，每个决策都是工程权衡：
 - **数组**：O(1) 随机访问，但插入删除要搬移。
@@ -1561,7 +1871,9 @@ HashMap 是"哈希表 + 链表/红黑树"的混合结构，每个决策都是工
 - **红黑树**：查找/插入/删除 O(log n)，避免哈希退化时链表变 O(n)。
 - 组合：桶用数组 O(1) 定位，桶内冲突用链表（少时）或红黑树（多时）。
 
-### 数据结构
+**② 怎么做 / 原理图解**
+
+**数据结构**
 ```
 table[] (Node / TreeNode)
   [0] → null
@@ -1573,7 +1885,7 @@ Node { int hash; K key; V value; Node next; }
 TreeNode extends Node { parent, left, right, prev, red; }
 ```
 
-### 核心参数
+**核心参数**
 ```java
 static final int DEFAULT_INITIAL_CAPACITY = 16;
 static final float DEFAULT_LOAD_FACTOR = 0.75f;
@@ -1582,7 +1894,7 @@ static final int UNTREEIFY_THRESHOLD = 6;     // 树退化链表
 static final int MIN_TREEIFY_CAPACITY = 64;   // 树化要求数组长度
 ```
 
-### hash 扰动函数 🔴
+**hash 扰动函数** 🔴
 ```java
 static final int hash(Object key) {
     int h;
@@ -1592,7 +1904,7 @@ static final int hash(Object key) {
 - **高 16 位异或低 16 位**，让高位也参与桶定位。
 - 原因：桶下标 `(n-1) & hash`，n 通常小（如 16），只用低几位，碰撞多。扰动让高位也影响。
 
-### 桶下标计算 🔴
+**桶下标计算** 🔴
 ```java
 index = (n - 1) & hash;  // n 是 2 的幂，等价 hash % n 但更快
 ```
@@ -1600,7 +1912,31 @@ index = (n - 1) & hash;  // n 是 2 的幂，等价 hash % n 但更快
 - `(n-1) & hash` 等价 `hash % n`，但位运算快。
 - 扩容时，元素新位置要么 `原 idx`，要么 `idx + oldCap`（看 hash 新增高位 bit），高效迁移。
 
-### put 流程源码 🔴
+**为什么链表转树阈值是 8？**🔴
+- 理想 hash 下，桶内元素数服从**泊松分布**（λ=0.5）。
+- 长度 8 的概率 ≈ 0.00000006，属"极端异常"（hash 退化或恶意攻击）。
+- 平时几乎不树化（树化开销大）。
+- 退化阈值 6（不是 7，避免 7-8 来回抖动）。
+
+**JDK7 多线程死循环（头插法）**🔴🔴
+```
+JDK7 扩容时 transfer，头插法迁移链表：
+原链表：A → B → null
+线程1 扩容，处理到 A（记下 next=B）
+线程2 扩容完成，B → A（头插反转）
+线程1 继续，A.next=B → 把 B 接到新表头 → B.next=A → 环！
+→ get 遍历到环 → CPU 100%
+```
+JDK8 改尾插（保持原顺序），不成环，但**仍非线程安全**（并发 put 丢数据、size 不准）。
+
+**resize 扩容优化（JDK8）**🔴
+- 扩容 2 倍。
+- 元素重新定位：`newIndex = (hash & oldCap) == 0 ? oldIndex : oldIndex + oldCap`。
+- 不用重算 hash，只看新增高位 bit。
+
+**③ 代码验证 / 代码示例**
+
+**put 流程源码** 🔴
 ```java
 final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
     Node<K,V>[] tab = table;
@@ -1646,37 +1982,32 @@ final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
 }
 ```
 
-### 为什么链表转树阈值是 8？🔴
-- 理想 hash 下，桶内元素数服从**泊松分布**（λ=0.5）。
-- 长度 8 的概率 ≈ 0.00000006，属"极端异常"（hash 退化或恶意攻击）。
-- 平时几乎不树化（树化开销大）。
-- 退化阈值 6（不是 7，避免 7-8 来回抖动）。
+**④ 真实案例**
 
-### JDK7 多线程死循环（头插法）🔴🔴
-```
-JDK7 扩容时 transfer，头插法迁移链表：
-原链表：A → B → null
-线程1 扩容，处理到 A（记下 next=B）
-线程2 扩容完成，B → A（头插反转）
-线程1 继续，A.next=B → 把 B 接到新表头 → B.next=A → 环！
-→ get 遍历到环 → CPU 100%
-```
-JDK8 改尾插（保持原顺序），不成环，但**仍非线程安全**（并发 put 丢数据、size 不准）。
-
-### resize 扩容优化（JDK8）🔴
-- 扩容 2 倍。
-- 元素重新定位：`newIndex = (hash & oldCap) == 0 ? oldIndex : oldIndex + oldCap`。
-- 不用重算 hash，只看新增高位 bit。
-
-### 【真实案例 - 企迈茶饮】
 门店商品 SKU 缓存用 HashMap（外层 Caffeine），峰值 50 万 SKU。曾遇并发 put 导致 size 不准（少几个），改用 ConcurrentHashMap 解决。也遇到过 key 用自定义对象没重写 hashCode/equals 导致内存泄漏（重复 key 堆积），后来用 Lombok @EqualsAndHashCode 自动生成。
 
-### 【面试话术】
-「HashMap 我会按『数据结构 → 核心参数 → hash 扰动 → put 流程 → 为什么阈值 8 → JDK7 死循环 → resize 优化』讲。数据结构是数组+链表+红黑树。hash 扰动是高 16 位异或低 16 位，让高位参与桶定位（因为 n-1 掩码通常只取低位）。桶下标用 (n-1)&hash 而不是 % n，因为位运算快 + 扩容时元素要么留原位要么 idx+oldCap。put 流程必背：桶空直接放、桶非空看是链表还是红黑树、key 相等覆盖、链表尾插、≥8 树化。为什么阈值 8？泊松分布下长度 8 概率 0.00000006，是异常情况才树化。JDK7 头插法多线程死循环，JDK8 改尾插不成环但仍非线程安全。企迈门店 SKU 缓存早期用 HashMap 并发 put 丢数据，改 ConcurrentHashMap。踩过自定义对象 key 没重写 hashCode/equals 导致重复 key 堆积的坑，用 Lombok @EqualsAndHashCode 解决。」
+**⑤ 面试怎么说**
+
+「HashMap 我会按『数据结构 → 核心参数 → hash 扰动 → put 流程 → 为什么阈值 8 → JDK7 死循环 → resize 优化』讲。数据结构是数组+链表+红黑树。hash 扰动是高 16 位异或低 16 位，让高位参与桶定位（因为 n-1 掩码通常只取低位）。桶下标用 (n-1)&hash 而不是 % n，因为位运算快 + 扩容时元素要么留原位要么 idx+oldCap。put 流程必背：桶空直接放、桶非空看是链表还是红黑树、key 相等覆盖、链表尾插、≥8 树化。为什么阈值 8？泊松分布下长度 8 概率 0.00000006，是异常情况才树化。JDK7 头插法多线程死循环，JDK8 改尾插不成环但仍非线程安全。门店 SKU 缓存早期用 HashMap 并发 put 丢数据，改 ConcurrentHashMap。踩过自定义对象 key 没重写 hashCode/equals 导致重复 key 堆积的坑，用 Lombok @EqualsAndHashCode 解决。」
 
 ---
 
 ## 3.2 ConcurrentHashMap put 流程（JDK8）🔴
+
+**① 为什么 / 痛点**
+
+为什么 put 要分级处理？为了让"无冲突时零开销、有冲突时锁粒度最小"。空桶直接 CAS 无锁插入，只有桶非空才 synchronized 锁头节点，锁粒度=桶。扩容时还能多线程协助，不阻塞写。
+
+**② 怎么做 / 原理图解**
+
+**关键设计点**
+1. **桶空 CAS 无锁**：避免无冲突时上锁，零开销。
+2. **桶非空 synchronized 锁头节点**：锁粒度=桶，并发度高。
+3. **hash==MOVED（ForwardingNode）帮忙扩容**：多线程协助迁移，加速扩容。
+4. **二次确认 `tabAt(tab,i)==f`**：防止 CAS 后桶已被替换。
+5. **addCount 分段计数**：baseCount CAS 失败时用 CounterCell[]（借鉴 LongAdder），减少竞争。
+
+**③ 代码验证 / 代码示例**
 
 ```java
 final V putVal(K key, V value, boolean onlyIfAbsent) {
@@ -1704,23 +2035,21 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 }
 ```
 
-### 【关键设计点】
-1. **桶空 CAS 无锁**：避免无冲突时上锁，零开销。
-2. **桶非空 synchronized 锁头节点**：锁粒度=桶，并发度高。
-3. **hash==MOVED（ForwardingNode）帮忙扩容**：多线程协助迁移，加速扩容。
-4. **二次确认 `tabAt(tab,i)==f`**：防止 CAS 后桶已被替换。
-5. **addCount 分段计数**：baseCount CAS 失败时用 CounterCell[]（借鉴 LongAdder），减少竞争。
+**④ 真实案例**
 
-### 【面试话术】
+门店商品本地缓存用 ConcurrentHashMap，高峰 QPS 上万的读多写少场景，空桶 CAS 路径几乎零开销，是性能关键。
+
+**⑤ 面试怎么说**
+
 「ConcurrentHashMap put 流程我背得出：hash 定位桶 → 桶空 CAS 无锁插入 → 桶非空 synchronized 锁头节点 → hash==MOVED 帮忙扩容 → addCount 分段计数。亮点是『空桶 CAS + 非空 synchronized』的分级策略，无冲突时零开销，有冲突锁粒度到桶。扩容时多线程协助（helpTransfer，ForwardingNode 标记 MOVED）是个很巧妙的设计，让扩容不阻塞写。size 用 baseCount + CounterCell[] 分段累加（LongAdder 思路），弱一致。」
 
 ---
 
 ## 3.3 ArrayList / LinkedList 对比
 
-### 【为什么/痛点】为什么 99% 用 ArrayList？
+**① 为什么 / 痛点**
 
-很多人以为"频繁增删用 LinkedList"，这是误解。LinkedList 的增删优势只在"已持有节点引用"时（如迭代器删除），业务场景几乎都是先 `get(i)` 定位（O(n)）再增删，整体还是 O(n)。而 ArrayList 连续内存对 CPU 缓存友好，实测性能远超 LinkedList。
+为什么 99% 用 ArrayList？很多人以为"频繁增删用 LinkedList"，这是误解。LinkedList 的增删优势只在"已持有节点引用"时（如迭代器删除），业务场景几乎都是先 `get(i)` 定位（O(n)）再增删，整体还是 O(n)。而 ArrayList 连续内存对 CPU 缓存友好，实测性能远超 LinkedList。
 
 | | ArrayList | LinkedList |
 |---|-----------|------------|
@@ -1730,6 +2059,8 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 | 中间增删 | O(n)（搬移） | O(1)（已定位节点，但定位 O(n)） |
 | 内存 | 紧凑 | 每节点多 prev/next 指针 |
 
+**② 怎么做 / 原理图解**
+
 **ArrayList 扩容**：首次 10，之后 `oldCap + (oldCap >> 1)` = 1.5 倍（`Arrays.copyOf`）。
 
 **为什么 99% 用 ArrayList？** 🔴
@@ -1737,41 +2068,61 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 - LinkedList 增删优势在"已持有节点引用"时才体现，业务场景几乎不存在（都是先 get(i) 定位再增删，get 本身 O(n)）。
 - LinkedList 实现了 Deque，可做队列/栈（但 ArrayDeque 更快）。
 
-### 【真实案例 - 企迈茶饮】
+**③ 代码验证 / 代码示例**
+
+```java
+// 预知大小时，避免多次扩容
+List<String> list = new ArrayList<>(expectedSize);
+// ArrayList 扩容源码：1.5 倍
+int newCapacity = oldCapacity + (oldCapacity >> 1);
+elementData = Arrays.copyOf(elementData, newCapacity);
+```
+
+**④ 真实案例**
+
 优惠券列表查询默认 ArrayList。曾有个场景用 LinkedList 做"频繁头插"，结果遍历时性能差，改 ArrayDeque（头尾 O(1)）+ 数组实现，性能提 3 倍。
 
-### 【面试话术】
+**⑤ 面试怎么说**
+
 「ArrayList vs LinkedList 我会纠正一个常见误区——『频繁增删用 LinkedList』是错的。LinkedList 增删 O(1) 的前提是『已持有节点引用』，业务里都是先 get(i) 定位（O(n)）再删，整体还是 O(n)。而 ArrayList 连续内存对 CPU 缓存友好，实测性能远超 LinkedList。我有个经验：99% 场景用 ArrayList，需要队列/栈用 ArrayDeque（比 LinkedList 快），LinkedList 几乎不用。ArrayList 扩容 1.5 倍（首次 10），如果预知大小用 new ArrayList<>(expectedSize) 避免多次扩容。」
 
 ---
 
 ## 3.4 TreeMap / LinkedHashMap
 
-### 【为什么/痛点】为什么有这两个？
+**① 为什么 / 痛点**
 
+为什么有这两个？
 - **TreeMap**：需要按 key 排序遍历（如优惠券按面额排序、Top N）。红黑树 O(log n)。
 - **LinkedHashMap**：需要保持插入顺序或访问顺序（LRU 缓存）。HashMap + 双向链表。
+
+**② 怎么做 / 原理图解**
 
 - **TreeMap**：红黑树，key 有序（Comparable/Comparator），O(log n)。需排序遍历时用。
 - **LinkedHashMap**：HashMap + 双向链表，维护**插入顺序**或**访问顺序**（accessOrder=true）。
   - **LRU 经典实现**：accessOrder=true + 重写 removeEldestEntry。
-  ```java
-  class LRU<K,V> extends LinkedHashMap<K,V> {
-      private final int cap;
-      LRU(int cap) { super(cap, 0.75f, true); this.cap = cap; }  // accessOrder=true
-      @Override
-      protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
-          return size() > cap;  // 超容量淘汰最久未访问
-      }
-  }
-  ```
 
-### 【真实案例 - 企迈茶饮】
+**③ 代码验证 / 代码示例**
+
+```java
+class LRU<K,V> extends LinkedHashMap<K,V> {
+    private final int cap;
+    LRU(int cap) { super(cap, 0.75f, true); this.cap = cap; }  // accessOrder=true
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
+        return size() > cap;  // 超容量淘汰最久未访问
+    }
+}
+```
+
+**④ 真实案例**
+
 - TreeMap：优惠券按"面额降序"排序展示（Comparator）。
 - LinkedHashMap：早期本地 LRU 缓存实现，后换 Caffeine（W-TinyLFU，命中率更高）。
 
-### 【面试话术】
-「TreeMap 是红黑树，key 有序，O(log n)，用于需要排序遍历的场景（如券按面额排序、Top N）。LinkedHashMap 是 HashMap + 双向链表，可保持插入顺序或访问顺序（accessOrder=true）。LRU 经典实现就是 LinkedHashMap accessOrder=true + 重写 removeEldestEntry，超容量淘汰最久未访问。企迈早期本地缓存用这个 LRU，后来换 Caffeine（W-TinyLFU 算法命中率更高，支持过期时间）。」
+**⑤ 面试怎么说**
+
+「TreeMap 是红黑树，key 有序，O(log n)，用于需要排序遍历的场景（如券按面额排序、Top N）。LinkedHashMap 是 HashMap + 双向链表，可保持插入顺序或访问顺序（accessOrder=true）。LRU 经典实现就是 LinkedHashMap accessOrder=true + 重写 removeEldestEntry，超容量淘汰最久未访问。早期本地缓存用这个 LRU，后来换 Caffeine（W-TinyLFU 算法命中率更高，支持过期时间）。」
 
 ---
 
@@ -1779,8 +2130,9 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 
 ## 4.1 BIO → NIO → AIO
 
-### 【为什么/痛点】为什么要演进？
+**① 为什么 / 痛点**
 
+为什么要演进？
 - **BIO**：一个连接一个线程，连接数上去后线程爆炸。痛点：连接数受限。
 - **NIO**：一个线程管多个连接（多路复用），用 Selector 监听事件。痛点解决：单线程可管几万连接（Netty 用此）。
 - **AIO**：真正的异步（OS 完成 IO 后回调），无需应用轮询。痛点：Linux 的 AIO 实现不成熟（epoll 模拟），Netty 也放弃 AIO 用 NIO。
@@ -1791,10 +2143,29 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 | 实现 | InputStream/OutputStream | Channel + Selector + Buffer | CompletionHandler |
 | 适用 | 连接少 | 连接多（Netty） | 连接多且数据量大 |
 
-### 【面试话术】
+**② 怎么做 / 原理图解**
+
+演进的核心是『连接数 + 线程数』的解耦：BIO 把两者 1:1 绑定，NIO 用多路复用让一个线程管多连接，AIO 把"等数据"也交给 OS。
+
+**③ 代码验证 / 代码示例**
+
+NIO 的核心代码示例见 4.2 节。
+
+**④ 真实案例**
+
+高并发网关用 Netty（基于 NIO），单机扛几万长连接没问题。
+
+**⑤ 面试怎么说**
+
 「BIO→NIO→AIO 的演进核心是『连接数 + 线程数』的解耦。BIO 一个连接一个线程，连接多就线程爆炸。NIO 多路复用让一个线程管几万连接（epoll_wait 事件驱动），Netty 就是基于这个。AIO 是真异步（OS 完成回调），但 Linux AIO 不成熟（epoll 模拟），Netty 也放弃 AIO 用 NIO，所以 Java 圈实际还是 NIO 为主。」
 
+---
+
 ## 4.2 NIO 三大核心 🟡
+
+**① 为什么 / 痛点**
+
+NIO 的三大核心 Buffer/Channel/Selector 解决了 BIO 的两大痛点：① 数据在 IO 间搬运需要 Channel（双向、可非阻塞）；② 大量连接需要一个高效的事件分发机制（Selector 多路复用），避免每连接一线程。
 
 ### Buffer
 ```
@@ -1802,6 +2173,21 @@ position（当前位置）→ limit（限制）→ capacity（容量）
 写模式：position 从 0 增，limit=capacity
 flip() 切读：limit=position, position=0
 ```
+
+**② 怎么做 / 原理图解**
+
+**Selector（多路复用）**
+- Linux 基于 **epoll**（epoll_wait），O(1) 事件通知。
+- 一个线程管几万连接（Netty 用此）。
+
+**epoll vs select/poll**：
+| | select | poll | epoll |
+|---|--------|------|-------|
+| FD 上限 | 1024 | 无 | 无 |
+| 复杂度 | O(n) | O(n) | O(1) |
+| 机制 | 每次拷贝 FD 集 + 遍历 | 同 select | 红黑树 + 就绪链表，事件驱动 |
+
+**③ 代码验证 / 代码示例**
 
 ```java
 ByteBuffer buf = ByteBuffer.allocate(1024);
@@ -1811,10 +2197,8 @@ byte b = buf.get();    // 读
 buf.clear();           // 复位（数据还在，position=0, limit=capacity）
 ```
 
-### Channel（双向）
-FileChannel / SocketChannel / ServerSocketChannel / DatagramChannel。
+**Channel（双向）**：FileChannel / SocketChannel / ServerSocketChannel / DatagramChannel。
 
-### Selector（多路复用）
 ```java
 Selector selector = Selector.open();
 channel.configureBlocking(false);
@@ -1827,40 +2211,40 @@ while (true) {
     }
 }
 ```
-- Linux 基于 **epoll**（epoll_wait），O(1) 事件通知。
-- 一个线程管几万连接（Netty 用此）。
 
-**epoll vs select/poll**：
-| | select | poll | epoll |
-|---|--------|------|-------|
-| FD 上限 | 1024 | 无 | 无 |
-| 复杂度 | O(n) | O(n) | O(1) |
-| 机制 | 每次拷贝 FD 集 + 遍历 | 同 select | 红黑树 + 就绪链表，事件驱动 |
+**④ 真实案例**
 
-### 【面试话术】
-「NIO 三大核心 Buffer/Channel/Selector。Buffer 三个指针 position/limit/capacity，flip() 切读写。Channel 双向，Selector 多路复用——一个线程管几万连接，Linux 底层是 epoll（红黑树 + 就绪链表，O(1) 事件通知），比 select/poll 的 O(n) 遍历强。Netty 就基于 NIO 封装。企迈高并发网关用 Netty，单机扛几万长连接没问题。」
+高并发网关用 Netty，单机扛几万长连接没问题。
+
+**⑤ 面试怎么说**
+
+「NIO 三大核心 Buffer/Channel/Selector。Buffer 三个指针 position/limit/capacity，flip() 切读写。Channel 双向，Selector 多路复用——一个线程管几万连接，Linux 底层是 epoll（红黑树 + 就绪链表，O(1) 事件通知），比 select/poll 的 O(n) 遍历强。Netty 就基于 NIO 封装。高并发网关用 Netty，单机扛几万长连接没问题。」
+
+---
 
 ## 4.3 零拷贝（Zero-Copy）🔴🔴
 
-### 【为什么/痛点】为什么要零拷贝？
+**① 为什么 / 痛点**
 
-传统"读文件发网络"有 4 次拷贝（2 次 DMA + 2 次 CPU）+ 4 次上下文切换（user/kernel 来回）。数据从磁盘到网卡，中间多次进出用户空间是浪费。零拷贝的目标是**减少 CPU 拷贝和上下文切换**，让数据尽量留在内核态。
+为什么要零拷贝？传统"读文件发网络"有 4 次拷贝（2 次 DMA + 2 次 CPU）+ 4 次上下文切换（user/kernel 来回）。数据从磁盘到网卡，中间多次进出用户空间是浪费。零拷贝的目标是**减少 CPU 拷贝和上下文切换**，让数据尽量留在内核态。
 
-### 传统读文件发网络（4 次拷贝 + 4 次上下文切换）
+**② 怎么做 / 原理图解**
+
+**传统读文件发网络（4 次拷贝 + 4 次上下文切换）**
 ```
 1. read(): 磁盘 → 内核读缓冲（DMA）→ 用户空间 buffer（CPU 拷贝）
 2. write(): 用户 buffer → 内核 socket 缓冲（CPU）→ 网卡（DMA）
 上下文切换：user→kernel→user→kernel→user
 ```
 
-### mmap（内存映射）
+**mmap（内存映射）**
 ```
 mmap() 把文件映射到用户空间内存（与内核共享）
 读文件：用户直接读映射内存（无需内核→用户拷贝）
 省去一次 CPU 拷贝
 ```
 
-### sendfile（Linux 2.1+）
+**sendfile（Linux 2.1+）**
 ```
 sendfile() 内核直接从读缓冲 → socket 缓冲 → 网卡
 全程不进用户空间
@@ -1868,19 +2252,36 @@ Linux 2.4+ 配合 DMA gather，连 socket 缓冲都省（只传描述符）
 2 次拷贝（都是 DMA）
 ```
 
-### 三种方式对比
+**三种方式对比**
 | 方式 | CPU 拷贝 | DMA 拷贝 | 上下文切换 | 适用 |
 |------|---------|---------|-----------|------|
 | 传统 | 2 | 2 | 4 | — |
 | mmap | 1 | 2 | 4 | 用户态需处理数据 |
 | sendfile | 0 | 2 | 2 | 纯转发（Kafka） |
 
-### 应用场景 🔴
+**③ 代码验证 / 代码示例**
+
+**应用场景** 🔴
 - **Kafka**：用 sendfile 顺序读 + PageCache，超高吞吐。
 - **Netty**：FileRegion 用 sendfile；用 DirectByteBuffer 减一次拷贝。
 - **Nginx**：sendfile 默认开。
 
-### 【面试话术】
+```java
+// Netty 零拷贝发送文件（FileRegion 底层用 sendfile）
+FileChannel fileChannel = new FileInputStream(file).getChannel();
+DefaultFileRegion region = new DefaultFileRegion(fileChannel, 0, fileChannel.size());
+channel.writeAndFlush(region);
+
+// Java NIO 的 transferTo 也走 sendfile
+sourceChannel.transferTo(0, sourceChannel.size(), targetChannel);
+```
+
+**④ 真实案例**
+
+Kafka 顺序读 + sendfile + PageCache 是它超高吞吐的关键；Netty FileRegion 用 sendfile；Nginx sendfile 默认开。
+
+**⑤ 面试怎么说**
+
 「零拷贝我讲『传统 4 次拷贝 + 4 次切换 → mmap 省 1 次 CPU 拷贝 → sendfile 省 2 次 CPU 拷贝 + 2 次切换』。传统 read+write 数据磁盘到网卡要进出用户空间 4 次拷贝 + 4 次上下文切换。mmap 把文件映射到用户空间和内核共享，省一次 CPU 拷贝。sendfile 全程不进用户空间，Linux 2.4+ 配 DMA gather 连 socket 缓冲都省（只传描述符），2 次 DMA 拷贝 + 2 次切换。Kafka 顺序读 + sendfile + PageCache 是它超高吞吐的关键。Netty FileRegion 也用 sendfile，DirectByteBuffer 减一次拷贝。Nginx sendfile 默认开。」
 
 ---
@@ -1889,9 +2290,9 @@ Linux 2.4+ 配合 DMA gather，连 socket 缓冲都省（只传描述符）
 
 ## 5.1 各版本重要特性
 
-### 【为什么/痛点】为什么要了解新特性？
+**① 为什么 / 痛点**
 
-8 年工程师不能用 Java 8 写所有代码。新特性解决真实痛点：
+为什么要了解新特性？8 年工程师不能用 Java 8 写所有代码。新特性解决真实痛点：
 - **Lambda/Stream**：函数式编程，集合操作更简洁。
 - **var**：减少样板代码（局部变量类型推断）。
 - **Record**：不可变 DTO，替代 Lombok @Data 写一堆样板。
@@ -1907,11 +2308,15 @@ Linux 2.4+ 配合 DMA gather，连 socket 缓冲都省（只传描述符）
 | Java 17 (LTS) | Sealed 类、Pattern Matching（instanceof）、Record、Switch 表达式、文本块 """ |
 | Java 21 (LTS) | **虚拟线程**、Pattern Matching for switch、Record Patterns、Sequenced Collections |
 
-### 【常用新特性代码示例】
+**② 怎么做 / 原理图解**
+
+新特性的核心价值：用更少的代码表达更强的语义，并借助 JVM/编译器优化保持甚至提升性能。Record/sealed 是编译期生成 equals/hashCode/构造等样板；Stream 借助 SPLITERATOR 和 pipeline 做惰性求值；var 只是编译期类型推断（不影响运行时类型）。
+
+**③ 代码验证 / 代码示例**
 
 **Stream API（Java 8）**：
 ```java
-// 企迈：找出所有满减券按面额降序取前 3 的券名
+// 找出所有满减券按面额降序取前 3 的券名
 coupons.stream()
     .filter(c -> c.getType() == CouponType.FULL_REDUCTION)
     .sorted(Comparator.comparing(Coupon::getAmount).reversed())
@@ -1951,29 +2356,29 @@ String json = """
     """.formatted(shopId, coupon);
 ```
 
-### 【LTS 版本选型建议】
+**④ 真实案例**
+
+项目现在还在 Java 8，但有计划升 17，主要是为了 Record 和 Switch 表达式减少样板代码，加上 G1 在 17 上更成熟。Stream 在券列表过滤、排序、分组场景天天用。
+
+**LTS 版本选型建议**：
 - **Java 8**：存量系统，短期不动。
 - **Java 11**：稳定过渡，主流企业。
 - **Java 17**：新项目首选，生态成熟。
 - **Java 21**：虚拟线程尝鲜，高并发场景值得升级。
 
-### 【面试话术】
-「新特性我重点掌握 5 个：Java 8 的 Lambda/Stream（函数式集合操作，企迈券列表过滤排序分组天天用）、Java 14 的 Record（不可变 DTO 替代 Lombok @Data 样板）、Java 16 的 Pattern Matching（instanceof + 强转简化）、Java 17 的 Sealed/Switch 表达式/文本块、Java 21 的虚拟线程。LTS 选型我建议新项目用 17（生态成熟），高并发 IO 场景考虑 21（虚拟线程）。企迈现在还在 8，但有计划升 17，主要是为了 Record 和 Switch 表达式减少样板代码，加上 G1 在 17 上更成熟。」
+**⑤ 面试怎么说**
+
+「新特性我重点掌握 5 个：Java 8 的 Lambda/Stream（函数式集合操作，券列表过滤排序分组天天用）、Java 14 的 Record（不可变 DTO 替代 Lombok @Data 样板）、Java 16 的 Pattern Matching（instanceof + 强转简化）、Java 17 的 Sealed/Switch 表达式/文本块、Java 21 的虚拟线程。LTS 选型我建议新项目用 17（生态成熟），高并发 IO 场景考虑 21（虚拟线程）。项目现在还在 8，但有计划升 17，主要是为了 Record 和 Switch 表达式减少样板代码，加上 G1 在 17 上更成熟。」
+
+---
 
 ## 5.2 虚拟线程（Virtual Thread，JDK21）🔴 重点
 
-### 【为什么/痛点】虚拟线程解决什么问题？
+**① 为什么 / 痛点**
 
-传统平台线程（Platform Thread）= OS 线程，昂贵（1MB 栈 + OS 调度）。一个 IO 密集服务开几千个线程就到极限。虚拟线程是 **JVM 调度的轻量级线程**，由 JVM 在少量载体线程上调度，IO 阻塞时让出载体线程——**用同步代码写出异步性能，告别 callback 地狱**。
+虚拟线程解决什么问题？传统平台线程（Platform Thread）= OS 线程，昂贵（1MB 栈 + OS 调度）。一个 IO 密集服务开几千个线程就到极限。虚拟线程是 **JVM 调度的轻量级线程**，由 JVM 在少量载体线程上调度，IO 阻塞时让出载体线程——**用同步代码写出异步性能，告别 callback 地狱**。
 
-```java
-Thread.startVirtualThread(() -> { /* task */ });
-
-// 或线程池
-Executors.newVirtualThreadPerTaskExecutor();
-```
-
-### 【原理图解】
+**② 怎么做 / 原理图解**
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -1992,7 +2397,7 @@ Executors.newVirtualThreadPerTaskExecutor();
 - 虚拟线程在 IO 阻塞时**让出载体线程**（unmount），IO 完成后再 mount 回来。
 - 一个应用可起**百万级**虚拟线程。
 
-### 【与传统线程对比】
+**与平台线程对比**：
 | | 平台线程 | 虚拟线程 |
 |---|---------|---------|
 | 实现 | OS 线程（1:1） | JVM 调度（M:N） |
@@ -2001,21 +2406,37 @@ Executors.newVirtualThreadPerTaskExecutor();
 | 调度 | OS 抢占 | JVM 协作（IO 时让出） |
 | 阻塞 | 烧线程 | 让出载体线程，零浪费 |
 
-### 适用与注意 🔴
+**适用与注意** 🔴
 - **适用**：高并发 IO 密集（HTTP 服务、DB 查询），同步代码写出异步性能（无 callback 地狱）。
 - **不适用**：CPU 密集（无收益）、synchronized 长时间持锁（JDK21 会"钉住"载体线程，建议用 ReentrantLock）。
 - 与平台线程 API 兼容，ThreadLocal/InheritableThreadLocal 可用（但有性能注意）。
 
-### 【"钉住"载体线程的坑】🔴
+**"钉住"载体线程的坑** 🔴
 - JDK21 中，虚拟线程在 `synchronized` 代码块内阻塞（如 wait、IO）会**钉住（pin）载体线程**，载体线程无法服务其他虚拟线程，退化成平台线程的弊端。
 - 解决：用 `ReentrantLock` 替代 synchronized（JDK21 的虚拟线程会正确 unmount）。
 - JDK24 优化了 synchronized 的 pinning 问题。
 
-### 【真实案例 - 通用互联网】
+**③ 代码验证 / 代码示例**
+
+```java
+Thread.startVirtualThread(() -> { /* task */ });
+
+// 或线程池
+Executors.newVirtualThreadPerTaskExecutor();
+
+// 优先用 ReentrantLock 替代 synchronized 避免 pinning
+ReentrantLock lock = new ReentrantLock();
+lock.lock();
+try { /* critical section */ } finally { lock.unlock(); }
+```
+
+**④ 真实案例**
+
 一个 HTTP 网关服务，原来用平台线程池（200 线程），QPS 上限 2000。换虚拟线程（百万级），QPS 提到 10 万+，代码几乎不改（Tomcat 已支持虚拟线程）。注意要把 synchronized 改 ReentrantLock 避免 pinning。
 
-### 【面试话术】
-「虚拟线程是 JDK21 最大的特性，解决了『IO 密集型服务线程数受限』的痛点。传统平台线程是 OS 线程（1:1），1MB 栈 + OS 调度，几千个就到极限。虚拟线程是 JVM 调度的轻量线程（M:N），跑在少量载体线程（ForkJoinPool）上，IO 阻塞时 unmount 让出载体线程，完成后 mount 回来——用同步代码写出异步性能，告别 callback 地狱。一个应用可起百万级虚拟线程。适用高并发 IO，不适用 CPU 密集。最大坑是 JDK21 里 synchronized 会『钉住』载体线程（阻塞时不 unmount），要用 ReentrantLock 替代。我在通用 HTTP 网关场景研究过，平台线程池 200 线程 QPS 上限 2000，换虚拟线程 QPS 提到 10 万+，代码几乎不改（Tomcat 已支持）。企迈券计算 IO 密集，未来升 21 后是巨大优化空间。」
+**⑤ 面试怎么说**
+
+「虚拟线程是 JDK21 最大的特性，解决了『IO 密集型服务线程数受限』的痛点。传统平台线程是 OS 线程（1:1），1MB 栈 + OS 调度，几千个就到极限。虚拟线程是 JVM 调度的轻量线程（M:N），跑在少量载体线程（ForkJoinPool）上，IO 阻塞时 unmount 让出载体线程，完成后 mount 回来——用同步代码写出异步性能，告别 callback 地狱。一个应用可起百万级虚拟线程。适用高并发 IO，不适用 CPU 密集。最大坑是 JDK21 里 synchronized 会『钉住』载体线程（阻塞时不 unmount），要用 ReentrantLock 替代。我在通用 HTTP 网关场景研究过，平台线程池 200 线程 QPS 上限 2000，换虚拟线程 QPS 提到 10 万+，代码几乎不改（Tomcat 已支持）。券计算 IO 密集，未来升 21 后是巨大优化空间。」
 
 ---
 
