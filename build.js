@@ -14,7 +14,10 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const BASE = __dirname;
-const HTML_OUT = path.join(BASE, 'index.html');
+// 输出到 public/ 子目录，Cloudflare Pages 只托管这个目录（源码不暴露）
+const PUBLIC_DIR = path.join(BASE, 'public');
+fs.mkdirSync(PUBLIC_DIR, { recursive: true });
+const HTML_OUT = path.join(PUBLIC_DIR, 'index.html');
 
 // ===== 1. 配置：三个文件夹 =====
 const groups = [
