@@ -48,6 +48,11 @@ function renderTable(rows) {
   return h + '</tbody></table>';
 }
 function renderMd(md) {
+  // 兼容 Windows(CRLF)/Mac 旧式换行：最先统一成 LF，
+  // 否则 ```\r\n 开头的代码块、^(#{1,6})\s+(.*)$、^---+$、^\|.*\|\s*$ 等
+  // 依赖 \n/$ 锚点的正则会全部失配，导致代码块/标题/表格/引用/分隔线/列表
+  // 全部塌成 <p>，整页排版错乱。
+  md = md.replace(/\r\n?/g, '\n');
   const codes = [];
   md = md.replace(/```([a-zA-Z0-9]*)\n([\s\S]*?)```/g, (_, lang, code) => {
     codes.push(`<pre class="code-block"><code>${esc(code.replace(/\n$/, ''))}</code></pre>`);
