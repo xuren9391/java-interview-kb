@@ -47,7 +47,7 @@ function renderTable(rows) {
   });
   return h + '</tbody></table>';
 }
-function renderMd(md) {
+function renderMd(md, headings) {
   // 兼容 Windows(CRLF)/Mac 旧式换行：最先统一成 LF，
   // 否则 ```\r\n 开头的代码块、^(#{1,6})\s+(.*)$、^---+$、^\|.*\|\s*$ 等
   // 依赖 \n/$ 锚点的正则会全部失配，导致代码块/标题/表格/引用/分隔线/列表
@@ -66,6 +66,8 @@ function renderMd(md) {
   const lines = md.split('\n');
   let html = '';
   let inUl = false, inOl = false, inTodo = false, inTable = false, tableRows = [];
+  // 是否在代码块内（用占位符后的纯文本无法判断，这里用单独标记）
+  let inCode = false;
   const closeLists = () => {
     if (inUl) { html += '</ul>'; inUl = false; }
     if (inOl) { html += '</ol>'; inOl = false; }
@@ -78,7 +80,13 @@ function renderMd(md) {
     if (m = /^(#{1,6})\s+(.*)$/.exec(line)) {
       closeLists(); closeTable();
       const lv = m[1].length;
-      html += `<h${lv} id="${slug()}">${inlineFn(m[2])}</h${lv}>`; continue;
+      const hid = slug();
+      const titleText = m[2].replace(/\*\*|`/g, '').trim();
+      // 收集 H2/H3 作为侧边栏二级目录
+      if (headings && (lv === 2 || lv === 3)) {
+        headings.push({ id: hid, level: lv, text: titleText });
+      }
+      html += `<h${lv} id="${hid}">${inlineFn(m[2])}</h${lv}>`; continue;
     }
     if (m = /^-\s+\[([ xX])\]\s+(.*)$/.exec(line)) {
       if (!inTodo) { closeLists(); html += '<ul class="todo-list">'; inTodo = true; }
@@ -163,6 +171,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hira
 .doc-link{display:block;padding:6px 12px;color:var(--text);text-decoration:none;border-radius:6px;font-size:13.5px;line-height:1.4;cursor:pointer;margin:1px 0;transition:background .1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .doc-link:hover{background:var(--bg-soft);}
 .doc-link.active{background:var(--primary-soft);color:var(--primary);font-weight:600;}
+/* 二级目录（当前文档的 H2/H3 章节） */
+.sub-nav{padding:2px 0 6px 8px;max-height:0;overflow:hidden;transition:max-height .25s ease;border-left:2px solid transparent;margin-left:8px;}
+.sub-nav.open{max-height:6000px;overflow-y:auto;border-left:2px solid var(--border);}
+.sub-nav:empty{display:none;}
+.sub-link{display:block;padding:4px 10px;color:var(--text-soft);text-decoration:none;font-size:12.5px;line-height:1.4;cursor:pointer;border-radius:4px;margin:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sub-link:hover{color:var(--primary);background:var(--bg-soft);}
+.sub-link.active{color:var(--primary);font-weight:600;background:var(--primary-soft);}
+.sub-link.lv3{padding-left:22px;font-size:12px;}
+.doc-inner{scroll-margin-top:64px;}
+.doc h2,.doc h3{scroll-margin-top:64px;}
 .content{flex:1;margin-left:280px;padding:36px 48px 100px;transition:margin-left .2s;}
 .content.full{margin-left:0;}
 .doc{display:none;max-width:900px;margin:0 auto;}
@@ -211,25 +229,82 @@ const JS = `
 var links=document.querySelectorAll('.doc-link');
 var docs=document.querySelectorAll('.doc');
 var progress=document.getElementById('progress');
+var DOCS=window.__DOCS__;
+
+// 构建每个文档的二级目录（H2/H3）并注入侧边栏
+function buildSubNav(id){
+  var sub=document.getElementById('sub-'+id);
+  if(!sub||sub.dataset.built)return;
+  var doc=DOCS.find(function(d){return d.id===id;});
+  if(!doc||!doc.headings||!doc.headings.length){sub.dataset.built='1';return;}
+  sub.innerHTML=doc.headings.map(function(h){
+    var cls='sub-link'+(h.level===3?' lv3':'');
+    return '<a class="'+cls+'" data-hid="'+h.id+'" data-doc="'+id+'">'+h.text+'</a>';
+  }).join('');
+  sub.dataset.built='1';
+}
+
+// 当前文档的高亮跟踪
+var currentSubNav=null;
+function highlightHeading(){
+  if(!currentSubNav)return;
+  var docId=currentSubNav;
+  // 找当前可视区域内最靠上的 H2/H3
+  var headEls=document.querySelectorAll('#'+docId+' h2[id], #'+docId+' h3[id]');
+  var cur=null;
+  var probe=scrollY+80;
+  for(var i=0;i<headEls.length;i++){
+    if(headEls[i].offsetTop<=probe)cur=headEls[i];
+    else break;
+  }
+  var curId=cur?cur.id:null;
+  var sub=document.getElementById('sub-'+docId);
+  if(!sub)return;
+  sub.querySelectorAll('.sub-link').forEach(function(s){
+    s.classList.toggle('active',s.getAttribute('data-hid')===curId);
+  });
+  // 让高亮的章节在侧边栏可见
+  var act=sub.querySelector('.sub-link.active');
+  if(act){var sr=act.getBoundingClientRect();if(sr.top<60||sr.bottom>innerHeight)act.scrollIntoView({block:'nearest'});}
+}
+
 function showDoc(id){
   docs.forEach(function(d){d.classList.toggle('active',d.id===id);});
   links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-id')===id);});
+  // 折叠所有二级目录，只展开当前文档的
+  document.querySelectorAll('.sub-nav').forEach(function(s){s.classList.remove('open');});
+  buildSubNav(id);
+  var curSub=document.getElementById('sub-'+id);
+  if(curSub)curSub.classList.add('open');
+  currentSubNav=id;
   window.scrollTo(0,0);
   history.replaceState(null,'','#'+id);
   var active=document.querySelector('.doc-link.active');
   if(active)active.scrollIntoView({block:'nearest'});
+  setTimeout(highlightHeading,50);
 }
 links.forEach(function(l){l.addEventListener('click',function(e){e.preventDefault();showDoc(l.getAttribute('data-id'));if(innerWidth<=768)document.getElementById('sidebar').classList.remove('show');});});
+// 二级目录点击：跳转到对应标题
+document.addEventListener('click',function(e){
+  var sl=e.target.closest('.sub-link');
+  if(!sl)return;
+  e.preventDefault();
+  var hid=sl.getAttribute('data-hid'),docId=sl.getAttribute('data-doc');
+  if(docId!==currentSubNav)showDoc(docId);
+  var el=document.getElementById(hid);
+  if(el){window.scrollTo(0,el.offsetTop-64);}
+  setTimeout(highlightHeading,80);
+});
 var initId=location.hash?location.hash.slice(1):(links[0]?links[0].getAttribute('data-id'):'');
 if(initId&&document.getElementById(initId))showDoc(initId);
-else if(docs[0]){docs[0].classList.add('active');if(links[0])links[0].classList.add('active');}
+else if(docs[0]){docs[0].classList.add('active');if(links[0])links[0].classList.add('active');buildSubNav(docs[0].id);var fs=document.getElementById('sub-'+docs[0].id);if(fs)fs.classList.add('open');currentSubNav=docs[0].id;}
 var tb=document.getElementById('theme-toggle');
 function setTheme(d){document.body.classList.toggle('dark',d);tb.textContent=d?'☀️':'🌙';try{localStorage.setItem('kb-theme',d?'dark':'light');}catch(e){}}
 var sv=null;try{sv=localStorage.getItem('kb-theme');}catch(e){}
 setTheme(sv?sv==='dark':false);
 tb.addEventListener('click',function(){setTheme(!document.body.classList.contains('dark'));});
 document.getElementById('menu-toggle').addEventListener('click',function(){document.getElementById('sidebar').classList.toggle('show');});
-var si=document.getElementById('search'),sp=document.getElementById('search-panel'),sr=document.getElementById('search-results'),DOCS=window.__DOCS__;
+var si=document.getElementById('search'),sp=document.getElementById('search-panel'),sr=document.getElementById('search-results');
 si.addEventListener('input',function(){
   var q=si.value.trim().toLowerCase();
   if(!q){sp.classList.add('hidden');return;}
@@ -258,6 +333,7 @@ document.addEventListener('keydown',function(e){
 window.addEventListener('scroll',function(){
   var h=document.documentElement.scrollHeight-innerHeight;
   progress.style.width=(h>0?(scrollY/h*100):0)+'%';
+  highlightHeading();
 });
 `;
 
@@ -269,10 +345,13 @@ function build() {
     sidebarHtml += `<div class="group"><div class="group-title">${g.name}</div>`;
     g.files.forEach((f, fi) => {
       const id = `doc-${gi}-${fi}`;
+      const headings = [];
       sidebarHtml += `<a class="doc-link" data-id="${id}" href="#${id}">${f.name}</a>`;
-      contentHtml += `<article id="${id}" class="doc"><div class="doc-inner"><h1 class="doc-title">${f.name}</h1>${renderMd(f.content)}</div></article>`;
+      // 二级目录容器：放当前文档的 H2/H3 章节，展开/收起
+      sidebarHtml += `<div class="sub-nav" data-for="${id}" id="sub-${id}"></div>`;
+      contentHtml += `<article id="${id}" class="doc"><div class="doc-inner"><h1 class="doc-title">${f.name}</h1>${renderMd(f.content, headings)}</div></article>`;
       const plain = f.content.replace(/[#*`>|()\[\]\-]/g, ' ').replace(/\s+/g, ' ');
-      docIndex.push({ id, name: f.name, text: plain.toLowerCase() });
+      docIndex.push({ id, name: f.name, text: plain.toLowerCase(), headings });
     });
     sidebarHtml += `</div>`;
   });
